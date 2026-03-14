@@ -1,16 +1,19 @@
+import logging
+import threading
+import os
 from fastapi import FastAPI
 from pydantic import BaseModel
-from google import genai
 from dotenv import load_dotenv
-from prompt import SYSTEM_PROMPT
-from database import get_profile, save_profile, get_messages, save_message
-from extractor import extract_profile
-from datetime import datetime
-import os
+from chat import get_response
+from bot import run_telegram_bot
 
 load_dotenv()
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -25,42 +28,12 @@ def home():
 
 @app.post("/chat")
 def chat(message: Message):
-
-    # 1. Fetch profile and history
-    profile = get_profile(message.user_id)
-    history = get_messages(message.user_id)
-
-    # 2. Build context for Gemini
-    context = SYSTEM_PROMPT
-    context += f"\n\nCURRENT DATE AND TIME: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-
-    if message.new_session:
-        context += "\n\nNEW SESSION STARTED — the user is starting fresh today."
-
-    if profile:
-        context += f"\n\nWHAT YOU KNOW ABOUT THIS USER:\n{profile}"
-
-    if history:
-        context += "\n\nRECENT HISTORY:\n"
-        for msg in history:
-            role = "User" if msg["role"] == "user" else "MYRROR"
-            context += f"{role}: {msg['content']}\n"
-
-    context += f"\nUser: {message.content}\nMYRROR:"
-
-    # 3. Call Gemini
-    response = client.models.generate_content(
-        model="gemini-3.1-flash-lite-preview",
-        contents=context
-    )
-    text = response.text
-
-    # 4. Extract and save updated profile
-    updated_profile = extract_profile(profile, message.content, text)
-    save_profile(message.user_id, updated_profile)
-
-    # 5. Save messages
-    save_message(message.user_id, "user", message.content)
-    save_message(message.user_id, "assistant", text)
-
+    text = get_response(message.user_id, message.content, message.new_session)
     return {"response": text}
+
+@app.on_event("startup")
+def startup_event():
+    if os.getenv("TELEGRAM_TOKEN"):
+        thread = threading.Thread(target=run_telegram_bot, daemon=True)
+        thread.start()
+        logger.info("Telegram bot started.")
