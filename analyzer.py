@@ -2,7 +2,6 @@ import logging
 import os
 import base64
 from google import genai
-from google.genai import types
 from dotenv import load_dotenv
 from prompt import SYSTEM_PROMPT
 from database import get_profile, save_message
@@ -75,10 +74,7 @@ INSTRUCTIONS:
 """
             response = client.models.generate_content(
                 model="gemini-3.1-flash-lite-preview",
-                contents=analysis_prompt,
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())]
-                )
+                contents=analysis_prompt
             )
 
         elif mime == "application/pdf" or mime.startswith("image/"):
