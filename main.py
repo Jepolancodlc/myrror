@@ -1,11 +1,13 @@
 import logging
 import threading
+import asyncio
 import os
 from fastapi import FastAPI
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from chat import get_response
 from bot import run_telegram_bot
+from keepalive import keep_alive
 
 load_dotenv()
 
@@ -26,14 +28,19 @@ class Message(BaseModel):
 def home():
     return {"message": "MYRROR online"}
 
+@app.get("/health")
+def health():
+    return {"status": "alive"}
+
 @app.post("/chat")
 def chat(message: Message):
     text = get_response(message.user_id, message.content, message.new_session)
     return {"response": text}
 
 @app.on_event("startup")
-def startup_event():
+async def startup_event():
     if os.getenv("TELEGRAM_TOKEN"):
         thread = threading.Thread(target=run_telegram_bot, daemon=True)
         thread.start()
         logger.info("Telegram bot started.")
+    asyncio.create_task(keep_alive())
