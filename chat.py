@@ -13,11 +13,46 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
+def detect_crisis(content: str, history: list, profile: dict) -> bool:
+    crisis_keywords = [
+        "no puedo más", "para qué", "no tiene sentido", "vacío", "solo",
+        "no vale la pena", "rendirse", "desaparecer", "cansado de todo",
+        "can't take it", "what's the point", "give up", "disappear",
+        "no quiero", "harto", "todo mal", "nothing matters", "worthless",
+        "me quiero morir", "no quiero vivir", "i want to die", "kill myself"
+    ]
+
+    content_lower = content.lower()
+    keyword_hit = any(kw in content_lower for kw in crisis_keywords)
+
+    hour = datetime.now().hour
+    unusual_hour = hour >= 23 or hour <= 5
+
+    last = profile.get("last_conversation", "")
+    long_silence = False
+    if last:
+        try:
+            last_dt = datetime.strptime(last, "%Y-%m-%d %H:%M")
+            days_silent = (datetime.now() - last_dt).days
+            long_silence = days_silent > 3
+        except:
+            pass
+
+    recent_dark = False
+    if history and len(history) >= 2:
+        recent = " ".join([m["content"] for m in history[-4:] if m["role"] == "user"])
+        recent_dark = any(kw in recent.lower() for kw in crisis_keywords)
+
+    if keyword_hit and (unusual_hour or long_silence or recent_dark):
+        return True
+
+    keyword_count = sum(1 for kw in crisis_keywords if kw in content_lower)
+    if keyword_count >= 2:
+        return True
+
+    return False
+
 async def analyze_conversation_context(content: str, history: list) -> str:
-    """
-    Understand the conversational flow naturally.
-    Detects topic changes, avoidance, unresolved threads, tone shifts.
-    """
     if not history or len(history) < 2:
         return ""
 
@@ -38,13 +73,6 @@ In ONE natural sentence, describe what's happening conversationally.
 Focus on: topic changes, avoidance patterns, unresolved threads, tone shifts.
 Be observational, not mechanical. No labels or categories.
 
-Examples:
-- "The user is continuing the same topic naturally."
-- "The user just shifted subject — they were talking about work, now asking something lighter."
-- "The user seems to be avoiding the previous question by changing topic."
-- "Something important was left unresolved — worth noting but don't force it."
-- "The user's energy feels lighter than before."
-
 One sentence only.
 """
 
@@ -62,10 +90,9 @@ def get_response(user_id: str, content: str, new_session: bool = False) -> str:
     profile = get_profile(user_id)
     history = get_messages(user_id)
 
-    # Build context
     ctx = SYSTEM_PROMPT
 
-    # Time awareness — let Gemini figure out what to do with it
+    # Time awareness
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     last = profile.get("last_conversation", "")
     ctx += f"\n\nCURRENT TIME: {now}"
@@ -75,11 +102,16 @@ def get_response(user_id: str, content: str, new_session: bool = False) -> str:
     if new_session:
         ctx += "\n\nThe user explicitly started a new session."
 
-    # Profile — layered by context
+    # Crisis detection
+    in_crisis = detect_crisis(content, history, profile)
+    if in_crisis:
+        ctx += "\n\nCRISIS MODE: The user may be struggling right now. Do NOT analyze, push, or give advice. Only listen. Be warm, present, and human. Ask one simple question: are they okay. If things seem serious, gently mention that talking to someone real can help."
+
+    # Profile
     if profile:
         ctx += f"\n\nWHAT YOU KNOW ABOUT THIS USER:\n{get_profile_for_context(profile, content)}"
 
-    # Conversational context — natural, not mechanical
+    # Conversational context
     if history and len(history) >= 2:
         try:
             loop = asyncio.get_event_loop()
@@ -101,7 +133,6 @@ def get_response(user_id: str, content: str, new_session: bool = False) -> str:
 
     ctx += f"\nUser: {content}\nMYRROR:"
 
-    # Call Gemini
     try:
         response = client.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
@@ -112,14 +143,12 @@ def get_response(user_id: str, content: str, new_session: bool = False) -> str:
         logger.error(f"Gemini error for {user_id}: {e}", exc_info=True)
         raise
 
-    # Update profile
     try:
         updated_profile = extract_profile(profile, content, text)
         save_profile(user_id, updated_profile)
     except Exception as e:
         logger.error(f"Profile update error for {user_id}: {e}", exc_info=True)
 
-    # Save messages
     try:
         save_message(user_id, "user", content)
         save_message(user_id, "assistant", text)
