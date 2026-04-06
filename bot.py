@@ -236,7 +236,7 @@ async def reflect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("I don't know you well enough yet. Talk to me more first.")
         return
 
-    await update.message.chat.send_action("typing")
+    status_msg = await update.message.reply_text("🪞 *Reflecting on your journey...*", parse_mode="Markdown")
 
     episodes_text = "\n".join([
         f"- [{ep.get('domain')}] {ep.get('event')} ({ep.get('created_at', '')[:10]})"
@@ -269,10 +269,10 @@ Respond in the user's language.
             model="gemini-3.1-flash-lite-preview",
             contents=prompt
         )
-        await update.message.reply_text(response.text)
+        await status_msg.edit_text(response.text)
     except Exception as e:
         logger.error(f"Reflect command error: {e}")
-        await update.message.reply_text("I had trouble generating your reflection. Try again in a moment.")
+        await status_msg.edit_text("I had trouble generating your reflection. Try again in a moment.")
 
 async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -284,13 +284,13 @@ async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Not enough data yet. Keep talking to me.")
         return
 
-    await update.message.chat.send_action("typing")
+    status_msg = await update.message.reply_text("📅 *Reviewing your week...*", parse_mode="Markdown")
 
     summary = await generate_weekly_summary(user_id, profile, messages, episodes)
     if summary:
-        await update.message.reply_text(summary)
+        await status_msg.edit_text(summary)
     else:
-        await update.message.reply_text("I had trouble generating your weekly summary. Try again in a moment.")
+        await status_msg.edit_text("I had trouble generating your weekly summary. Try again in a moment.")
 
 async def checkin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -351,6 +351,7 @@ async def flashback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     date = episode.get("created_at", "")[:10]
     
     prompt = f"The user experienced this event on {date}: '{event}'. Ask a deeply thoughtful, curious question about how they feel about it now, or how it shaped them since then. Keep it to one brief paragraph."
+    await update.message.chat.send_action("typing")
     try:
         response = client.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
         await update.message.reply_text(response.text.strip())
@@ -373,29 +374,34 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await context.bot.get_file(photo.file_id)
     file_bytes = await file.download_as_bytearray()
     caption = update.message.caption or "Analyze this image and tell me what you think."
+    status_msg = await update.message.reply_text("👁️ *Analyzing image...*", parse_mode="Markdown")
     try:
         text = await analyze_image(user_id, file_bytes, caption)
         profile = get_profile(user_id)
         asyncio.create_task(extract_and_save_profile(user_id, "image", caption, text, profile))
-        await update.message.reply_text(text)
+        asyncio.create_task(extract_episodes_from_content(user_id, f"Image: {caption}", text))
+        asyncio.create_task(extract_people(user_id, f"Image: {caption}", text))
+        await status_msg.edit_text(text)
     except Exception as e:
         logger.error(f"Image handler error for {user_id}: {e}", exc_info=True)
-        await update.message.reply_text("I had trouble reading that image. Try again in a moment.")
+        await status_msg.edit_text("I had trouble reading that image. Try again in a moment.")
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     await update.message.chat.send_action("typing")
+    status_msg = await update.message.reply_text("🎧 *Listening to your voice...*", parse_mode="Markdown")
     voice = update.message.voice
     file = await context.bot.get_file(voice.file_id)
     file_bytes = await file.download_as_bytearray()
     try:
         text = await analyze_voice(user_id, file_bytes, voice.mime_type or "audio/ogg")
+        await status_msg.delete()
         if text:
             content = f"[Voice Message] {text}"
             await process_message(update, user_id, content, False)
     except Exception as e:
         logger.error(f"Voice handler error for {user_id}: {e}", exc_info=True)
-        await update.message.reply_text("I had trouble listening to your voice message. Can you type it?")
+        await status_msg.edit_text("I had trouble listening to your voice message. Can you type it?")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -403,20 +409,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mime = document.mime_type or ""
     caption = update.message.caption or "Analyze this file and tell me what you think."
     await update.message.chat.send_action("typing")
+    status_msg = await update.message.reply_text("📄 *Reading document...*", parse_mode="Markdown")
     file = await context.bot.get_file(document.file_id)
     file_bytes = await file.download_as_bytearray()
     try:
         text = await analyze_document(user_id, file_bytes, mime, document.file_name, caption)
         if not text:
-            await update.message.reply_text("I can't read that file type yet. Try .txt, .pdf, or an image.")
+            await status_msg.edit_text("I can't read that file type yet. Try .txt, .pdf, or an image.")
             return
         profile = get_profile(user_id)
         asyncio.create_task(extract_and_save_profile(user_id, f"file:{document.file_name}", caption, text, profile))
         asyncio.create_task(extract_episodes_from_content(user_id, f"File: {caption}", text))
-        await update.message.reply_text(text)
+        asyncio.create_task(extract_people(user_id, f"File: {document.file_name} - {caption}", text))
+        await status_msg.edit_text(text)
     except Exception as e:
         logger.error(f"Document handler error for {user_id}: {e}", exc_info=True)
-        await update.message.reply_text("I had trouble reading that file. Try again in a moment.")
+        await status_msg.edit_text("I had trouble reading that file. Try again in a moment.")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MESSAGE HANDLER
@@ -478,6 +486,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_new_session = user_sessions.pop(user_id, False)
 
     async def debounced():
+        await update.message.chat.send_action("typing")
         # Simulate human reading time based on message length (min 1s, max 4s)
         reading_delay = max(1.0, min(len(content) * 0.02, 4.0))
         await asyncio.sleep(reading_delay)
