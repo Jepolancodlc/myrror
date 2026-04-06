@@ -199,7 +199,7 @@ Return ONLY pure JSON array. Empty [] if no people mentioned.
 ]
 """
     try:
-        result = client.models.generate_content(
+        result = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
@@ -267,7 +267,7 @@ RULES:
 """
 
     try:
-        result = client.models.generate_content(
+        result = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
@@ -312,7 +312,7 @@ Return ONLY a JSON array. Empty [] if nothing significant.
 [{{"event": "string", "domain": "tech|work|personal|health|finance|relationships|learning|emotional", "impact": "high|medium|low"}}]
 """
     try:
-        result = client.models.generate_content(
+        result = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
@@ -325,7 +325,7 @@ Return ONLY a JSON array. Empty [] if nothing significant.
                 embedding = None
                 try:
                     # Generamos el vector de memoria usando Gemini
-                    emb_res = client.models.embed_content(
+                    emb_res = await client.aio.models.embed_content(
                         model="text-embedding-004",
                         contents=episode["event"]
                     )
@@ -387,7 +387,7 @@ Be specific, honest, direct. Reference real things.
 Respond in the user's language.
 """
     try:
-        result = client.models.generate_content(
+        result = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt
         )
@@ -395,7 +395,7 @@ Respond in the user's language.
         
         embedding = None
         try:
-            emb_res = client.models.embed_content(
+            emb_res = await client.aio.models.embed_content(
                 model="text-embedding-004",
                 contents=f"Weekly summary: {summary[:200]}"
             )
@@ -437,7 +437,7 @@ CONVERSATION: {conversation}
 Include a brief self-critique: What approach worked or failed for MYRROR today? What should MYRROR change next time?
 """
     try:
-        result = client.models.generate_content(
+        result = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt
         )
@@ -445,7 +445,7 @@ Include a brief self-critique: What approach worked or failed for MYRROR today? 
         
         embedding = None
         try:
-            emb_res = client.models.embed_content(
+            emb_res = await client.aio.models.embed_content(
                 model="text-embedding-004",
                 contents=f"Daily summary: {summary[:200]}"
             )
@@ -493,7 +493,7 @@ CONVERSATION:
 Return only the summary. No labels.
 """
     try:
-        result = client.models.generate_content(
+        result = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt
         )
@@ -501,19 +501,3 @@ Return only the summary. No labels.
     except Exception as e:
         logger.error(f"History compression error for {user_id}: {e}", exc_info=True)
         return ""
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# LEGACY
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-def extract_profile(current_profile: dict, user_message: str, myrror_response: str) -> dict:
-    import asyncio
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            return current_profile
-        return loop.run_until_complete(
-            extract_and_save_profile("sync", "message", user_message, myrror_response, current_profile)
-        )
-    except Exception:
-        return current_profile

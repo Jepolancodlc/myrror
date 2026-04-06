@@ -8,7 +8,7 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from dotenv import load_dotenv
-from database import get_profile, get_episodes, get_all_messages, get_all_people, get_all_profiles, supabase
+from database import get_profile, get_episodes, get_messages, get_all_people, get_all_profiles, supabase
 from chat import get_response
 from analyzer import analyze_image, analyze_document, analyze_voice
 from extractor import (
@@ -53,7 +53,7 @@ def get_mood_keyboard():
 
 async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    profile = get_profile(user_id)
+    profile = await asyncio.to_thread(get_profile, user_id)
     evolution = profile.get("evolution", [])
 
     mood_data = [e for e in evolution if e.get("field") == "current_mood_score"]
@@ -102,8 +102,8 @@ async def sos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    profile = get_profile(user_id)
-    episodes = get_episodes(user_id, limit=100)
+    profile = await asyncio.to_thread(get_profile, user_id)
+    episodes = await asyncio.to_thread(get_episodes, user_id, limit=100)
     
     data = {"profile": profile, "episodes": episodes}
     file_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
@@ -120,7 +120,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
     """Checks if users have been silent for 3+ days and reaches out to them."""
-    profiles = get_all_profiles()
+    profiles = await asyncio.to_thread(get_all_profiles)
     now = datetime.now()
     
     for p in profiles:
@@ -140,11 +140,11 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(random.uniform(2.5, 5.0))
                 
                 prompt = f"The user {data.get('name', '')} hasn't spoken to you in {days_silent} days. Write a very short, warm, pressure-free message checking in. Don't ask for a big update, just let them know you're there if they need to talk."
-                response = client.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
+                response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
                 await context.bot.send_message(chat_id=user_id, text=response.text.strip())
                 # Update last conversation slightly so it doesn't trigger again today
                 data["last_conversation"] = now.strftime("%Y-%m-%d %H:%M")
-                supabase.table("profile").update({"data": data}).eq("user_id", user_id).execute()
+                await asyncio.to_thread(lambda: supabase.table("profile").update({"data": data}).eq("user_id", user_id).execute())
         except Exception as e:
             logger.error(f"Proactive job error for {user_id}: {e}")
 
@@ -154,11 +154,11 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def daily_maintenance_job(context: ContextTypes.DEFAULT_TYPE):
     """Runs daily to self-heal the semantic memory (generate missing embeddings)."""
-    profiles = get_all_profiles()
+    profiles = await asyncio.to_thread(get_all_profiles)
     from database import get_null_episodes, update_episode_embedding
     for p in profiles:
         user_id = p["user_id"]
-        episodes = get_null_episodes(user_id)
+        episodes = await asyncio.to_thread(get_null_episodes, user_id)
         if not episodes: continue
         
         fixed = 0
@@ -166,9 +166,9 @@ async def daily_maintenance_job(context: ContextTypes.DEFAULT_TYPE):
             event = ep.get("event")
             if not event: continue
             try:
-                emb_res = client.models.embed_content(model="text-embedding-004", contents=event)
+                emb_res = await client.aio.models.embed_content(model="text-embedding-004", contents=event)
                 if emb_res.embeddings:
-                    update_episode_embedding(ep["id"], emb_res.embeddings[0].values)
+                    await asyncio.to_thread(update_episode_embedding, ep["id"], emb_res.embeddings[0].values)
                     fixed += 1
                     await asyncio.sleep(0.5) # Anti-rate limit protection
             except Exception as e:
@@ -183,7 +183,7 @@ async def daily_maintenance_job(context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     user_sessions[user_id] = True
-    supabase.table("messages").delete().eq("user_id", user_id).execute()
+    await asyncio.to_thread(lambda: supabase.table("messages").delete().eq("user_id", user_id).execute())
     welcome_text = (
         "Hello. I am MYRROR.\n\n"
         "I am not a standard assistant. I am here to be a mirror for your mind, "
@@ -218,7 +218,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    profile = get_profile(user_id)
+    profile = await asyncio.to_thread(get_profile, user_id)
     if not profile:
         await update.message.reply_text("I don't know anything about you yet. Talk to me first.")
         return
@@ -235,7 +235,7 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def evolution_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    profile = get_profile(user_id)
+    profile = await asyncio.to_thread(get_profile, user_id)
     evolution = profile.get("evolution", [])
     if not evolution:
         await update.message.reply_text("No changes tracked yet. Keep talking to me.")
@@ -247,7 +247,7 @@ async def evolution_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def episodes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    episodes = get_episodes(user_id, limit=15)
+    episodes = await asyncio.to_thread(get_episodes, user_id, limit=15)
     if not episodes:
         await update.message.reply_text("No significant episodes recorded yet.")
         return
@@ -266,7 +266,7 @@ async def episodes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def people_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    people = get_all_people(user_id)
+    people = await asyncio.to_thread(get_all_people, user_id)
     if not people:
         await update.message.reply_text("I don't know anyone in your life yet. Tell me about the people around you.")
         return
@@ -281,8 +281,8 @@ async def people_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reflect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    profile = get_profile(user_id)
-    episodes = get_episodes(user_id, limit=20)
+    profile = await asyncio.to_thread(get_profile, user_id)
+    episodes = await asyncio.to_thread(get_episodes, user_id, limit=20)
 
     if not profile:
         await update.message.reply_text("I don't know you well enough yet. Talk to me more first.")
@@ -317,7 +317,7 @@ Respond in the user's language.
 """
 
     try:
-        response = client.models.generate_content(
+        response = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt
         )
@@ -328,9 +328,9 @@ Respond in the user's language.
 
 async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    profile = get_profile(user_id)
-    messages = get_all_messages(user_id)
-    episodes = get_episodes(user_id, limit=20)
+    profile = await asyncio.to_thread(get_profile, user_id)
+    messages = await asyncio.to_thread(get_messages, user_id, 40)
+    episodes = await asyncio.to_thread(get_episodes, user_id, limit=20)
 
     if not profile and not messages:
         await update.message.reply_text("Not enough data yet. Keep talking to me.")
@@ -350,7 +350,7 @@ async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(query.from_user.id)
     mood_val = query.data.split("_")[1]
     
-    profile = get_profile(user_id)
+    profile = await asyncio.to_thread(get_profile, user_id)
     new_data = {"current_mood_score": int(mood_val)}
     
     evolution = track_evolution(profile, new_data)
@@ -359,7 +359,7 @@ async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         profile["evolution"] = evolution
         
     from database import save_profile
-    save_profile(user_id, profile)
+    await asyncio.to_thread(save_profile, user_id, profile)
     
     response_texts = {
         "low": "You clicked low... I'm sorry things are heavy right now. I'm here if you want to vent.",
@@ -373,7 +373,7 @@ async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def contract_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    profile = get_profile(user_id)
+    profile = await asyncio.to_thread(get_profile, user_id)
     contracts = profile.get("personal_contracts", None)
     if not contracts:
         await update.message.reply_text(
@@ -393,13 +393,13 @@ async def contract_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    supabase.table("profile").delete().eq("user_id", user_id).execute()
-    supabase.table("messages").delete().eq("user_id", user_id).execute()
+    await asyncio.to_thread(lambda: supabase.table("profile").delete().eq("user_id", user_id).execute())
+    await asyncio.to_thread(lambda: supabase.table("messages").delete().eq("user_id", user_id).execute())
     await update.message.reply_text("Profile and history cleared. Starting fresh.")
 
 async def flashback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    episodes = get_episodes(user_id, limit=50)
+    episodes = await asyncio.to_thread(get_episodes, user_id, limit=50)
     
     # Skip recent ones and system summaries
     valid_episodes = [ep for ep in episodes[10:] if not ep.get("event", "").startswith("Daily summary") and not ep.get("event", "").startswith("Weekly summary")]
@@ -415,7 +415,7 @@ async def flashback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt = f"The user experienced this event on {date}: '{event}'. Ask a deeply thoughtful, curious question about how they feel about it now, or how it shaped them since then. Keep it to one brief paragraph."
     await update.message.chat.send_action("typing")
     try:
-        response = client.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
+        response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
         await update.message.reply_text(response.text.strip())
     except Exception as e:
         logger.error(f"Flashback error: {e}")
@@ -523,7 +523,7 @@ async def process_message(update: Update, user_id: str, content: str, is_new_ses
 
         if is_first_today:
             # Daily summary of yesterday
-            messages = get_all_messages(user_id)
+            messages = await asyncio.to_thread(get_messages, user_id, 20)
             if messages:
                 asyncio.create_task(generate_daily_summary(user_id, profile, messages))
 
@@ -533,8 +533,8 @@ async def process_message(update: Update, user_id: str, content: str, is_new_ses
 
         # Weekly summary on Sundays
         if datetime.now().weekday() == 6 and is_first_today:
-            messages = get_all_messages(user_id)
-            episodes = get_episodes(user_id, limit=20)
+            messages = await asyncio.to_thread(get_messages, user_id, 40)
+            episodes = await asyncio.to_thread(get_episodes, user_id, limit=20)
             asyncio.create_task(generate_weekly_summary(user_id, profile, messages, episodes))
 
     except Exception as e:

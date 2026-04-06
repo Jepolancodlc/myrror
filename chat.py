@@ -4,7 +4,7 @@ import asyncio
 from google import genai
 from dotenv import load_dotenv
 from prompt import SYSTEM_PROMPT
-from database import get_profile, save_profile, get_messages, get_all_messages, save_message, get_all_people, get_episodes, search_similar_episodes
+from database import get_profile, save_profile, get_messages, save_message, get_all_people, search_similar_episodes
 from extractor import extract_and_save_profile, get_profile_for_context, compress_history
 import random
 from datetime import datetime
@@ -77,7 +77,7 @@ One sentence only.
 """
 
     try:
-        result = client.models.generate_content(
+        result = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt
         )
@@ -86,10 +86,23 @@ One sentence only.
         logger.error(f"Context analysis error: {e}")
         return ""
 
+async def _background_profile_update(user_id: str, content: str, text: str, profile: dict, in_crisis: bool):
+    try:
+        updated_profile = await extract_and_save_profile(user_id, "message", content, text, profile)
+        if in_crisis:
+            updated_profile["last_crisis"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        else:
+            updated_profile.pop("crisis_checked", None)
+        updated_profile.pop("low_mood_checked", None)
+        updated_profile.pop("checkin_3_done", None)
+        updated_profile.pop("checkin_7_done", None)
+        save_profile(user_id, updated_profile)
+    except Exception as e:
+        logger.error(f"Profile update error for {user_id}: {e}", exc_info=True)
+
 async def get_response(user_id: str, content: str, new_session: bool = False) -> str:
-    profile = get_profile(user_id)
-    all_messages = get_all_messages(user_id)
-    recent_history = all_messages[-10:] if all_messages else []
+    profile = await asyncio.to_thread(get_profile, user_id)
+    recent_history = await asyncio.to_thread(get_messages, user_id, 10)
 
     ctx = SYSTEM_PROMPT
 
@@ -139,13 +152,13 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
 
     # Semantic RAG Memory Engine
     try:
-        emb_res = client.models.embed_content(
+        emb_res = await client.aio.models.embed_content(
             model="text-embedding-004",
             contents=content
         )
         if emb_res.embeddings:
             query_embedding = emb_res.embeddings[0].values
-            relevant_episodes = search_similar_episodes(user_id, query_embedding, limit=3)
+            relevant_episodes = await asyncio.to_thread(search_similar_episodes, user_id, query_embedding, limit=3)
             
             if relevant_episodes:
                 eps_text = "\n".join([f"- {ep.get('created_at', '')[:10]}: {ep.get('event')}" for ep in relevant_episodes])
@@ -155,22 +168,13 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         logger.error(f"RAG search error for {user_id}: {e}", exc_info=True)
 
     # People the user knows
-    people = get_all_people(user_id)
+    people = await asyncio.to_thread(get_all_people, user_id)
     if people:
         people_summary = "\n".join([
             f"- {p['name']} ({p.get('relationship', 'unknown')}): {p.get('notes', {}).get('description', '')}"
             for p in people
         ])
         ctx += f"\n\nPEOPLE IN THEIR LIFE:\n{people_summary}"
-
-    # Smart history — compress older messages
-    if len(all_messages) > 10:
-        try:
-            compressed = await compress_history(user_id, all_messages)
-            if compressed:
-                ctx += f"\n\nEARLIER CONVERSATION SUMMARY:\n{compressed}"
-        except Exception as e:
-            logger.error(f"History compression error: {e}")
 
     # Conversational context
     if recent_history and len(recent_history) >= 2:
@@ -191,7 +195,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
     ctx += f"\nUser: {content}\nMYRROR:"
 
     try:
-        response = client.models.generate_content(
+        response = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=ctx
         )
@@ -200,22 +204,11 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         logger.error(f"Gemini error for {user_id}: {e}", exc_info=True)
         raise
 
-    try:
-        updated_profile = await extract_and_save_profile(user_id, "message", content, text, profile)
-        if in_crisis:
-            updated_profile["last_crisis"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        else:
-            updated_profile.pop("crisis_checked", None)
-        updated_profile.pop("low_mood_checked", None)
-        updated_profile.pop("checkin_3_done", None)
-        updated_profile.pop("checkin_7_done", None)
-        save_profile(user_id, updated_profile)
-    except Exception as e:
-        logger.error(f"Profile update error for {user_id}: {e}", exc_info=True)
+    asyncio.create_task(_background_profile_update(user_id, content, text, profile, in_crisis))
 
     try:
-        save_message(user_id, "user", content)
-        save_message(user_id, "assistant", text)
+        asyncio.create_task(asyncio.to_thread(save_message, user_id, "user", content))
+        asyncio.create_task(asyncio.to_thread(save_message, user_id, "assistant", text))
     except Exception as e:
         logger.error(f"Message save error for {user_id}: {e}", exc_info=True)
 

@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from chat import get_response
 from bot import start_telegram_bot
 from keepalive import keep_alive
+from contextlib import asynccontextmanager
 
 load_dotenv()
 
@@ -16,7 +17,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if os.getenv("TELEGRAM_TOKEN"):
+        await start_telegram_bot()
+    asyncio.create_task(keep_alive())
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 class Message(BaseModel):
     user_id: str
@@ -35,9 +43,3 @@ def health():
 async def chat(message: Message):
     text = await get_response(message.user_id, message.content, message.new_session)
     return {"response": text}
-
-@app.on_event("startup")
-async def startup_event():
-    if os.getenv("TELEGRAM_TOKEN"):
-        await start_telegram_bot()
-    asyncio.create_task(keep_alive())

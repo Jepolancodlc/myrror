@@ -18,7 +18,7 @@ async def analyze_image(user_id: str, file_bytes: bytearray, caption: str) -> st
     image_base64 = base64.b64encode(file_bytes).decode("utf-8")
 
     try:
-        response = client.models.generate_content(
+        response = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=[
                 {
@@ -72,14 +72,14 @@ INSTRUCTIONS:
 4. Reference specific moments from the file.
 5. End with ONE specific question.
 """
-            response = client.models.generate_content(
+            response = await client.aio.models.generate_content(
                 model="gemini-3.1-flash-lite-preview",
                 contents=analysis_prompt
             )
 
         elif mime == "application/pdf" or mime.startswith("image/"):
             file_base64 = base64.b64encode(file_bytes).decode("utf-8")
-            response = client.models.generate_content(
+            response = await client.aio.models.generate_content(
                 model="gemini-3.1-flash-lite-preview",
                 contents=[
                     {
@@ -105,7 +105,7 @@ INSTRUCTIONS:
 async def analyze_voice(user_id: str, file_bytes: bytearray, mime: str) -> str:
     audio_base64 = base64.b64encode(file_bytes).decode("utf-8")
     try:
-        response = client.models.generate_content(
+        response = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=[
                 {

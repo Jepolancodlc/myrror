@@ -43,8 +43,9 @@ def get_all_profiles() -> list:
 
 def get_messages(user_id: str, limit: int = 10) -> list:
     try:
-        result = supabase.table("messages").select("*").eq("user_id", user_id).order("created_at").limit(limit).execute()
-        return result.data or []
+        # Ordenar descendente para obtener los últimos, y luego revertir para mantener el orden cronológico
+        result = supabase.table("messages").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(limit).execute()
+        return list(reversed(result.data)) if result.data else []
     except Exception as e:
         logger.error(f"get_messages error for {user_id}: {e}", exc_info=True)
         return []
