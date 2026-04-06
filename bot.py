@@ -3,6 +3,7 @@ import os
 import time
 import asyncio
 import json
+import random
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 from dotenv import load_dotenv
@@ -14,6 +15,7 @@ from extractor import (
     extract_people, generate_weekly_summary, generate_daily_summary
 )
 from google import genai
+from google.genai import types
 from datetime import datetime
 
 load_dotenv()
@@ -28,6 +30,69 @@ user_pending = {}
 
 COOLDOWN_SECONDS = 3
 MIN_MESSAGE_LENGTH = 2
+
+async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    profile = get_profile(user_id)
+    evolution = profile.get("evolution", [])
+
+    mood_data = [e for e in evolution if e.get("field") == "current_mood_score"]
+    if len(mood_data) < 2:
+        await update.message.reply_text("I need more conversations with you to track your mood evolution. Keep talking to me!")
+        return
+
+    try:
+        import matplotlib.pyplot as plt
+        import io
+        
+        dates = [e["date"][5:] for e in mood_data[-14:]] # Last 14 changes
+        scores = [float(str(e["to"]).replace(',', '.')) for e in mood_data[-14:] if str(e["to"]).replace('.', '', 1).isdigit()]
+
+        plt.figure(figsize=(8, 4))
+        plt.plot(dates[:len(scores)], scores, marker='o', color='#4A90E2', linestyle='-', linewidth=2)
+        plt.ylim(0, 10)
+        plt.title("Your Emotional Evolution")
+        plt.ylabel("Mood Score (1-10)")
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close()
+
+        await update.message.reply_photo(photo=buf, caption="Here is how your mood has been trending.")
+    except ImportError:
+        await update.message.reply_text("Visual tracking requires matplotlib. (Run: pip install matplotlib)")
+    except Exception as e:
+        logger.error(f"Mood graph error: {e}")
+        await update.message.reply_text("I couldn't generate the mood graph right now.")
+
+async def sos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🚨 **CRISIS RESOURCES** 🚨\n\n"
+        "I am an AI. I care about you, but I cannot replace real medical or psychological help.\n"
+        "If you feel you are in danger, please reach out to humans who can help you right now:\n\n"
+        "• **Emergency:** Call 112 (Europe) or 911 (Americas).\n"
+        "• **Crisis Text Line:** Text HOME to 741741\n"
+        "• **Global Helplines:** https://findahelpline.com/\n\n"
+        "You are not alone. Please talk to a professional."
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    profile = get_profile(user_id)
+    episodes = get_episodes(user_id, limit=100)
+    
+    data = {"profile": profile, "episodes": episodes}
+    file_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
+    
+    await update.message.reply_document(
+        document=file_bytes,
+        filename=f"myrror_backup.json",
+        caption="Here is a complete backup of your psychological profile and episodes."
+    )
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PROACTIVE ENGAGEMENT (BACKGROUND JOB)
@@ -67,7 +132,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     user_sessions[user_id] = True
     supabase.table("messages").delete().eq("user_id", user_id).execute()
-    await update.message.reply_text("New session started. I'm here.")
+    welcome_text = (
+        "Hello. I am MYRROR.\n\n"
+        "I am not a standard assistant. I am here to be a mirror for your mind, "
+        "to help you track your growth, and to remember what matters to you.\n\n"
+        "You can text me, send me voice notes, images, or documents. "
+        "Over time, I will learn your patterns, hold you to your commitments, and "
+        "support you when things get heavy.\n\n"
+        "Tell me, what brings you here today?"
+    )
+    await update.message.reply_text(welcome_text)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "Here is what you can ask me to do:\n\n"
+        "🧠 **Self-Discovery**\n"
+        "• /profile - See what I know about your personality & goals\n"
+        "• /evolution - Track how you've changed over time\n"
+        "• /episodes - View the significant moments of your life\n"
+        "• /people - See who I remember from your stories\n"
+        "• /mood - View a visual graph of your emotional evolution\n\n"
+        "🪞 **Reflection & Action**\n"
+        "• /reflect - Ask for a deep, honest reflection on where you are\n"
+        "• /flashback - Revisit a random past memory we've discussed\n"
+        "• /week - Get a summary of your week's patterns and commitments\n"
+        "• /contract - See the personal rules you've asked me to hold you to\n\n"
+        "⚙️ **System & Support**\n"
+        "• /sos - Get emergency resources if you're in crisis\n"
+        "• /export - Download a full backup of your data\n"
+        "• /reset - Erase all your history and start completely fresh"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -240,40 +335,32 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     supabase.table("messages").delete().eq("user_id", user_id).execute()
     await update.message.reply_text("Profile and history cleared. Starting fresh.")
 
+async def flashback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    episodes = get_episodes(user_id, limit=50)
+    
+    # Skip recent ones and system summaries
+    valid_episodes = [ep for ep in episodes[10:] if not ep.get("event", "").startswith("Daily summary") and not ep.get("event", "").startswith("Weekly summary")]
+    
+    if not valid_episodes:
+        await update.message.reply_text("We haven't shared enough history yet for a flashback. Let's make some memories first.")
+        return
+        
+    episode = random.choice(valid_episodes)
+    event = episode.get("event", "")
+    date = episode.get("created_at", "")[:10]
+    
+    prompt = f"The user experienced this event on {date}: '{event}'. Ask a deeply thoughtful, curious question about how they feel about it now, or how it shaped them since then. Keep it to one brief paragraph."
+    try:
+        response = client.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
+        await update.message.reply_text(response.text.strip())
+    except Exception as e:
+        logger.error(f"Flashback error: {e}")
+        await update.message.reply_text(f"I was just thinking about when you mentioned: '{event}' ({date}). How do you feel about that now?")
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # RELAPSE DETECTION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-def check_relapses(profile: dict) -> list:
-    contracts = profile.get("personal_contracts", [])
-    if not contracts:
-        return []
-
-    last = profile.get("last_conversation", "")
-    if not last:
-        return []
-
-    try:
-        last_dt = datetime.strptime(last, "%Y-%m-%d %H:%M")
-        days_since = (datetime.now() - last_dt).days
-    except:
-        return []
-
-    warnings = []
-    gym_keywords = ["gym", "gimnasio", "workout", "ejercicio", "exercise", "training"]
-    study_keywords = ["study", "estudiar", "learn", "aprender", "code", "coding"]
-    porn_keywords = ["porn", "porno", "nofap", "no fap"]
-
-    contracts_text = " ".join(str(c).lower() for c in contracts)
-
-    if any(kw in contracts_text for kw in gym_keywords) and days_since >= 3:
-        warnings.append(f"You committed to the gym but haven't mentioned it in {days_since} days.")
-    if any(kw in contracts_text for kw in study_keywords) and days_since >= 3:
-        warnings.append(f"You committed to studying but haven't mentioned it in {days_since} days.")
-    if any(kw in contracts_text for kw in porn_keywords) and days_since >= 1:
-        warnings.append(f"You made a commitment. How is it going?")
-
-    return warnings
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # FILE AND IMAGE HANDLERS
@@ -354,13 +441,7 @@ async def process_message(update: Update, user_id: str, content: str, is_new_ses
         text = await get_response(user_id, content, is_new_session)
         await update.message.reply_text(text)
 
-        # Relapse check on first message of the day
         if is_first_today:
-            warnings = check_relapses(profile)
-            if warnings:
-                warning_text = "\n".join(f"— {w}" for w in warnings)
-                await update.message.reply_text(warning_text)
-
             # Daily summary of yesterday
             messages = get_all_messages(user_id)
             if messages:
@@ -421,15 +502,18 @@ def run_telegram_bot():
     async def start_bot():
         telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
         telegram_app.add_handler(CommandHandler("start", start))
+        telegram_app.add_handler(CommandHandler("help", help_command))
         telegram_app.add_handler(CommandHandler("profile", profile_command))
         telegram_app.add_handler(CommandHandler("evolution", evolution_command))
         telegram_app.add_handler(CommandHandler("episodes", episodes_command))
         telegram_app.add_handler(CommandHandler("people", people_command))
         telegram_app.add_handler(CommandHandler("reflect", reflect_command))
+        telegram_app.add_handler(CommandHandler("flashback", flashback_command))
         telegram_app.add_handler(CommandHandler("week", week_command))
         telegram_app.add_handler(CommandHandler("checkin", checkin_command))
         telegram_app.add_handler(CommandHandler("contract", contract_command))
         telegram_app.add_handler(CommandHandler("reset", reset_command))
+        telegram_app.add_handler(CommandHandler("export", export_command))
         telegram_app.add_handler(CommandHandler("mood", mood_command))
         telegram_app.add_handler(CommandHandler("sos", sos_command))
         telegram_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
@@ -438,7 +522,7 @@ def run_telegram_bot():
         telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         # Run the proactive check every 12 hours
-        telegram_app.job_queue.run_repeating(proactive_check_job, interval=3600 * 12)
+        telegram_app.job_queue.run_repeating(proactive_check_job, interval=3600 * 4)
         
         await telegram_app.initialize()
         await telegram_app.start()

@@ -4,8 +4,9 @@ import asyncio
 from google import genai
 from dotenv import load_dotenv
 from prompt import SYSTEM_PROMPT
-from database import get_profile, save_profile, get_messages, get_all_messages, save_message, get_all_people
+from database import get_profile, save_profile, get_messages, get_all_messages, save_message, get_all_people, get_episodes
 from extractor import extract_and_save_profile, get_profile_for_context, compress_history
+import random
 from datetime import datetime
 
 load_dotenv()
@@ -130,6 +131,21 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         if compass:
             ctx += f"\n\nTHEIR LIFE COMPASS (What grounds them / gives them meaning): {compass}"
             ctx += "\nIf the user feels lost, drifting, or hopeless, gently remind them of this core purpose. Guide them back to their center."
+            
+        contracts = profile.get("personal_contracts")
+        if contracts:
+            ctx += f"\n\nTHEIR PERSONAL RULES/CONTRACTS: {contracts}"
+            ctx += "\nIf their current message shows they are breaking, ignoring, or making excuses about these rules, CALL THEM OUT directly but naturally in your response."
+
+    # Spontaneous Memories
+    episodes = get_episodes(user_id, limit=50)
+    if episodes:
+        valid_episodes = [ep for ep in episodes if not ep.get("event", "").startswith("Daily summary") and not ep.get("event", "").startswith("Weekly summary")]
+        if len(valid_episodes) >= 3:
+            random_eps = random.sample(valid_episodes, min(3, len(valid_episodes)))
+            eps_text = "\n".join([f"- {ep.get('created_at', '')[:10]}: {ep.get('event')}" for ep in random_eps])
+            ctx += f"\n\nSPONTANEOUS MEMORIES (Random past events):\n{eps_text}"
+            ctx += "\nIf any of these past memories naturally connect to what the user is saying right now, seamlessly bring it up like a real person would ('This reminds me of when you...', 'Like that time...'). If they don't fit, completely ignore them."
 
     # People the user knows
     people = get_all_people(user_id)
@@ -183,6 +199,9 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
             updated_profile["last_crisis"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         else:
             updated_profile.pop("crisis_checked", None)
+        updated_profile.pop("low_mood_checked", None)
+        updated_profile.pop("checkin_3_done", None)
+        updated_profile.pop("checkin_7_done", None)
         save_profile(user_id, updated_profile)
     except Exception as e:
         logger.error(f"Profile update error for {user_id}: {e}", exc_info=True)

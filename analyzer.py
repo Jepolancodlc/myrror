@@ -110,7 +110,13 @@ async def analyze_voice(user_id: str, file_bytes: bytearray, mime: str) -> str:
             contents=[
                 {
                     "parts": [
-                        {"text": "Transcribe this audio message exactly as spoken in its original language. Do not answer it or summarize it, return ONLY the raw transcription."},
+                        {"text": (
+                            "Listen carefully to this audio. You are natively multimodal, so pay attention to the emotional tone, "
+                            "voice cracks, sighing, laughing, breathing, or stress levels.\n\n"
+                            "Return the response in this exact format:\n"
+                            "[Voice Analysis: brief description of their emotional state and tone]\n"
+                            "<exact transcription in its original language>"
+                        )},
                         {"inline_data": {"mime_type": mime, "data": audio_base64}}
                     ]
                 }
