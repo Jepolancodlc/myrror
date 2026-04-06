@@ -77,7 +77,8 @@ def save_episode(user_id: str, event: str, domain: str = None, impact: str = Non
             "verified": False
         }
         if embedding:
-            data["embedding"] = embedding
+            # Forzar el formato string para pgvector: "[0.1,0.2,...]"
+            data["embedding"] = f"[{','.join(str(x) for x in embedding)}]"
         supabase.table("episodes").insert(data).execute()
     except Exception as e:
         logger.error(f"save_episode error for {user_id}: {e}", exc_info=True)
@@ -95,7 +96,8 @@ def search_similar_episodes(user_id: str, query_embedding: list, limit: int = 3)
         response = supabase.rpc(
             "match_episodes",
             {
-                "query_embedding": query_embedding,
+                # Forzar el formato string para la llamada RPC
+                "query_embedding": f"[{','.join(str(x) for x in query_embedding)}]",
                 "match_threshold": 0.6, # Solo recuerdos relevantes (60% de similitud o más)
                 "match_count": limit,
                 "p_user_id": user_id
@@ -123,6 +125,21 @@ def get_all_people(user_id: str) -> list:
     except Exception as e:
         logger.error(f"get_all_people error for {user_id}: {e}", exc_info=True)
         return []
+
+def get_null_episodes(user_id: str) -> list:
+    try:
+        result = supabase.table("episodes").select("*").eq("user_id", user_id).is_("embedding", "null").execute()
+        return result.data or []
+    except Exception as e:
+        logger.error(f"get_null_episodes error for {user_id}: {e}", exc_info=True)
+        return []
+
+def update_episode_embedding(episode_id: str, embedding: list):
+    try:
+        emb_str = f"[{','.join(str(x) for x in embedding)}]"
+        supabase.table("episodes").update({"embedding": emb_str}).eq("id", episode_id).execute()
+    except Exception as e:
+        logger.error(f"update_episode_embedding error for {episode_id}: {e}", exc_info=True)
 
 def save_person(user_id: str, name: str, relationship: str = None, notes: dict = {}):
     try:

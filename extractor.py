@@ -236,7 +236,7 @@ INTERACTION:
 User: "{content}"
 MYRROR: "{response}"
 
-Extract EVERYTHING about the USER. Think like a psychologist, life coach and detective.
+Extract EVERYTHING about the USER. Think like a psychologist, life coach and detective. Be highly self-critical: if the user rejected advice, got annoyed, or didn't engage, extract what MYRROR should do differently in 'failed_advice' or 'learning'.
 Pay special attention to upcoming events they mention (meetings, exams, trips).
 
 Look for: explicit facts, personality traits, emotional state, emotional patterns,
@@ -392,11 +392,24 @@ Respond in the user's language.
             contents=prompt
         )
         summary = result.text.strip()
+        
+        embedding = None
+        try:
+            emb_res = client.models.embed_content(
+                model="text-embedding-004",
+                contents=f"Weekly summary: {summary[:200]}"
+            )
+            if emb_res.embeddings:
+                embedding = emb_res.embeddings[0].values
+        except Exception as e:
+            logger.error(f"Weekly summary embedding error: {e}")
+
         save_episode(
             user_id=user_id,
             event=f"Weekly summary: {summary[:200]}",
             domain="personal",
-            impact="high"
+            impact="high",
+            embedding=embedding
         )
         logger.info(f"Weekly summary saved for {user_id}")
         return summary
@@ -420,7 +433,8 @@ async def generate_daily_summary(user_id: str, profile: dict, messages: list):
 PROFILE: {json.dumps(profile, ensure_ascii=False, separators=(',', ':'))}
 CONVERSATION: {conversation}
 
-3 sentences max. Third person. Specific. What to remember next time.
+3 sentences max. Third person. Specific.
+Include a brief self-critique: What approach worked or failed for MYRROR today? What should MYRROR change next time?
 """
     try:
         result = client.models.generate_content(
@@ -428,11 +442,24 @@ CONVERSATION: {conversation}
             contents=prompt
         )
         summary = result.text.strip()
+        
+        embedding = None
+        try:
+            emb_res = client.models.embed_content(
+                model="text-embedding-004",
+                contents=f"Daily summary: {summary[:200]}"
+            )
+            if emb_res.embeddings:
+                embedding = emb_res.embeddings[0].values
+        except Exception as e:
+            logger.error(f"Daily summary embedding error: {e}")
+            
         save_episode(
             user_id=user_id,
             event=f"Daily summary: {summary}",
             domain="personal",
-            impact="medium"
+            impact="medium",
+            embedding=embedding
         )
         logger.info(f"Daily summary saved for {user_id}")
     except Exception as e:

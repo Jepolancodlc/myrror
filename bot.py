@@ -5,13 +5,15 @@ import asyncio
 import json
 import random
 from telegram import Update
-from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from dotenv import load_dotenv
 from database import get_profile, get_episodes, get_all_messages, get_all_people, get_all_profiles, supabase
 from chat import get_response
 from analyzer import analyze_image, analyze_document, analyze_voice
 from extractor import (
-    extract_and_save_profile, extract_episodes_from_content, 
+    extract_and_save_profile, extract_episodes_from_content,
+    track_evolution,
     extract_people, generate_weekly_summary, generate_daily_summary
 )
 from google import genai
@@ -30,6 +32,24 @@ user_pending = {}
 
 COOLDOWN_SECONDS = 3
 MIN_MESSAGE_LENGTH = 2
+
+def get_mood_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("1 ⬛", callback_data="mood_1"),
+            InlineKeyboardButton("2", callback_data="mood_2"),
+            InlineKeyboardButton("3", callback_data="mood_3"),
+            InlineKeyboardButton("4", callback_data="mood_4"),
+            InlineKeyboardButton("5 🟨", callback_data="mood_5"),
+        ],
+        [
+            InlineKeyboardButton("6", callback_data="mood_6"),
+            InlineKeyboardButton("7", callback_data="mood_7"),
+            InlineKeyboardButton("8", callback_data="mood_8"),
+            InlineKeyboardButton("9", callback_data="mood_9"),
+            InlineKeyboardButton("10 🟩", callback_data="mood_10"),
+        ]
+    ])
 
 async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -115,6 +135,10 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
             
             # Reach out exactly on the 3rd and 7th day of silence
             if days_silent in [3, 7]:
+                # Simulate human typing delay
+                await context.bot.send_chat_action(chat_id=user_id, action="typing")
+                await asyncio.sleep(random.uniform(2.5, 5.0))
+                
                 prompt = f"The user {data.get('name', '')} hasn't spoken to you in {days_silent} days. Write a very short, warm, pressure-free message checking in. Don't ask for a big update, just let them know you're there if they need to talk."
                 response = client.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
                 await context.bot.send_message(chat_id=user_id, text=response.text.strip())
@@ -123,6 +147,34 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
                 supabase.table("profile").update({"data": data}).eq("user_id", user_id).execute()
         except Exception as e:
             logger.error(f"Proactive job error for {user_id}: {e}")
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# DAILY MAINTENANCE (BACKGROUND JOB)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def daily_maintenance_job(context: ContextTypes.DEFAULT_TYPE):
+    """Runs daily to self-heal the semantic memory (generate missing embeddings)."""
+    profiles = get_all_profiles()
+    from database import get_null_episodes, update_episode_embedding
+    for p in profiles:
+        user_id = p["user_id"]
+        episodes = get_null_episodes(user_id)
+        if not episodes: continue
+        
+        fixed = 0
+        for ep in episodes:
+            event = ep.get("event")
+            if not event: continue
+            try:
+                emb_res = client.models.embed_content(model="text-embedding-004", contents=event)
+                if emb_res.embeddings:
+                    update_episode_embedding(ep["id"], emb_res.embeddings[0].values)
+                    fixed += 1
+                    await asyncio.sleep(0.5) # Anti-rate limit protection
+            except Exception as e:
+                logger.error(f"Failed to fix memory {ep['id']}: {e}")
+        if fixed > 0:
+            logger.info(f"Auto-maintenance: Restored {fixed} fragmented memories for {user_id}.")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # COMMANDS
@@ -292,22 +344,32 @@ async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await status_msg.edit_text("I had trouble generating your weekly summary. Try again in a moment.")
 
-async def checkin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
+async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+    mood_val = query.data.split("_")[1]
+    
     profile = get_profile(user_id)
-    name = profile.get("name", "")
-
-    greeting = f"Hey{' ' + name if name else'}'}."
-
-    hour = datetime.now().hour
-    if hour < 12:
-        time_ref = "this morning"
-    elif hour < 18:
-        time_ref = "today"
-    else:
-        time_ref = "tonight"
-
-    await update.message.reply_text(f"{greeting} How are you doing {time_ref}?")
+    new_data = {"current_mood_score": int(mood_val)}
+    
+    evolution = track_evolution(profile, new_data)
+    profile["current_mood_score"] = int(mood_val)
+    if evolution:
+        profile["evolution"] = evolution
+        
+    from database import save_profile
+    save_profile(user_id, profile)
+    
+    response_texts = {
+        "low": "You clicked low... I'm sorry things are heavy right now. I'm here if you want to vent.",
+        "mid": "Right down the middle. Surviving the day. Anything specific on your mind?",
+        "high": "Glad to see you're doing well! Tell me what's making it a good day."
+    }
+    val = int(mood_val)
+    category = "low" if val <= 4 else ("mid" if val <= 7 else "high")
+    
+    await query.edit_message_text(text=f"Mood recorded: {mood_val}/10.\n\n{response_texts[category]}")
 
 async def contract_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -447,7 +509,17 @@ async def process_message(update: Update, user_id: str, content: str, is_new_ses
                 pass
 
         text = await get_response(user_id, content, is_new_session)
-        await update.message.reply_text(text)
+        
+        lower_text = text.lower()
+        mood_triggers = [
+            "how are you feeling", "cómo te sientes", "how do you feel", 
+            "cómo estás", "how are you today", "del 1 al 10",
+            "cómo te encuentras", "how are things today", "qué tal tu día", "how was your day"
+        ]
+        if any(kw in lower_text for kw in mood_triggers) and "?" in text:
+            await update.message.reply_text(text, reply_markup=get_mood_keyboard())
+        else:
+            await update.message.reply_text(text)
 
         if is_first_today:
             # Daily summary of yesterday
@@ -510,6 +582,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_telegram_bot():
     telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CallbackQueryHandler(mood_callback, pattern="^mood_"))
     telegram_app.add_handler(CommandHandler("help", help_command))
     telegram_app.add_handler(CommandHandler("profile", profile_command))
     telegram_app.add_handler(CommandHandler("evolution", evolution_command))
@@ -518,7 +591,6 @@ async def start_telegram_bot():
     telegram_app.add_handler(CommandHandler("reflect", reflect_command))
     telegram_app.add_handler(CommandHandler("flashback", flashback_command))
     telegram_app.add_handler(CommandHandler("week", week_command))
-    telegram_app.add_handler(CommandHandler("checkin", checkin_command))
     telegram_app.add_handler(CommandHandler("contract", contract_command))
     telegram_app.add_handler(CommandHandler("reset", reset_command))
     telegram_app.add_handler(CommandHandler("export", export_command))
@@ -532,6 +604,8 @@ async def start_telegram_bot():
     # Run the proactive check every 4 hours
     if telegram_app.job_queue:
         telegram_app.job_queue.run_repeating(proactive_check_job, interval=3600 * 4)
+        # Run daily maintenance (self-healing memory)
+        telegram_app.job_queue.run_repeating(daily_maintenance_job, interval=3600 * 24)
     else:
         logger.warning("JobQueue is None. Proactive background jobs are disabled. Install 'python-telegram-bot[job-queue]'.")
     
