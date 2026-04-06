@@ -498,35 +498,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # BOT STARTUP
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def run_telegram_bot():
-    async def start_bot():
-        telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
-        telegram_app.add_handler(CommandHandler("start", start))
-        telegram_app.add_handler(CommandHandler("help", help_command))
-        telegram_app.add_handler(CommandHandler("profile", profile_command))
-        telegram_app.add_handler(CommandHandler("evolution", evolution_command))
-        telegram_app.add_handler(CommandHandler("episodes", episodes_command))
-        telegram_app.add_handler(CommandHandler("people", people_command))
-        telegram_app.add_handler(CommandHandler("reflect", reflect_command))
-        telegram_app.add_handler(CommandHandler("flashback", flashback_command))
-        telegram_app.add_handler(CommandHandler("week", week_command))
-        telegram_app.add_handler(CommandHandler("checkin", checkin_command))
-        telegram_app.add_handler(CommandHandler("contract", contract_command))
-        telegram_app.add_handler(CommandHandler("reset", reset_command))
-        telegram_app.add_handler(CommandHandler("export", export_command))
-        telegram_app.add_handler(CommandHandler("mood", mood_command))
-        telegram_app.add_handler(CommandHandler("sos", sos_command))
-        telegram_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-        telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_image))
-        telegram_app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        # Run the proactive check every 12 hours
-        telegram_app.job_queue.run_repeating(proactive_check_job, interval=3600 * 4)
-        
-        await telegram_app.initialize()
-        await telegram_app.start()
-        await telegram_app.updater.start_polling()
-        await asyncio.Event().wait()
-
-    asyncio.run(start_bot())
+async def start_telegram_bot():
+    telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(CommandHandler("profile", profile_command))
+    telegram_app.add_handler(CommandHandler("evolution", evolution_command))
+    telegram_app.add_handler(CommandHandler("episodes", episodes_command))
+    telegram_app.add_handler(CommandHandler("people", people_command))
+    telegram_app.add_handler(CommandHandler("reflect", reflect_command))
+    telegram_app.add_handler(CommandHandler("flashback", flashback_command))
+    telegram_app.add_handler(CommandHandler("week", week_command))
+    telegram_app.add_handler(CommandHandler("checkin", checkin_command))
+    telegram_app.add_handler(CommandHandler("contract", contract_command))
+    telegram_app.add_handler(CommandHandler("reset", reset_command))
+    telegram_app.add_handler(CommandHandler("export", export_command))
+    telegram_app.add_handler(CommandHandler("mood", mood_command))
+    telegram_app.add_handler(CommandHandler("sos", sos_command))
+    telegram_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_image))
+    telegram_app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Run the proactive check every 4 hours
+    telegram_app.job_queue.run_repeating(proactive_check_job, interval=3600 * 4)
+    
+    await telegram_app.bot.delete_webhook(drop_pending_updates=True)
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling()
+    logger.info("Telegram bot started successfully in the main event loop.")

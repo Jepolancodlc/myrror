@@ -1,12 +1,11 @@
 import logging
-import threading
 import asyncio
 import os
 from fastapi import FastAPI
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from chat import get_response
-from bot import run_telegram_bot
+from bot import start_telegram_bot
 from keepalive import keep_alive
 
 load_dotenv()
@@ -40,7 +39,5 @@ async def chat(message: Message):
 @app.on_event("startup")
 async def startup_event():
     if os.getenv("TELEGRAM_TOKEN"):
-        thread = threading.Thread(target=run_telegram_bot, daemon=True)
-        thread.start()
-        logger.info("Telegram bot started.")
+        await start_telegram_bot()
     asyncio.create_task(keep_alive())
