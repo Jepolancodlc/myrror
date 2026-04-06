@@ -218,6 +218,13 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         if unrealized:
             ctx += f"\n\nUNREALIZED TRUTHS (Objective facts they haven't noticed about themselves): {unrealized}"
             
+        evolution_log = profile.get("evolution", [])
+        if evolution_log:
+            ctx += "\n\nRECENT PSYCHOLOGICAL EVOLUTION (How they are changing):"
+            for shift in evolution_log[-5:]:
+                ctx += f"\n- {shift['date']}: {shift['field']} changed: {shift['note']}"
+            ctx += "\nIMPORTANT: Acknowledge this fluidity. They are not static. Treat them as who they are becoming today, not just who they were yesterday."
+
         ctx += "\n\nGUIDANCE PROTOCOL (SOCRATIC METHOD):"
         ctx += "\nDo not just give the user the answers or lecture them. Instead, ask the *one right question* that forces them to realize the truth themselves. Guide them to their own epiphanies."
 

@@ -3,10 +3,11 @@ import json
 import os
 import copy
 import asyncio
+import random
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from database import save_profile, save_episode, save_person, get_all_people
+from database import save_profile, save_episode, save_person, get_all_people, save_message
 from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
@@ -15,6 +16,12 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+alert_callback = None
+
+def set_alert_callback(cb):
+    global alert_callback
+    alert_callback = cb
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PYDANTIC SCHEMAS (STRUCTURED OUTPUTS)
@@ -95,6 +102,49 @@ class EpisodeSchema(BaseModel):
     impact: Optional[str] = Field(default=None, description="high|medium|low")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# EPIPHANY ENGINE (AUTONOMOUS INSIGHTS)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def evaluate_and_send_epiphany(user_id: str, profile: dict, shifts: list):
+    # Humanize: wait 15-30 seconds so it feels like a sudden realization after the chat
+    await asyncio.sleep(random.randint(15, 30))
+    
+    shift_text = "\n".join([f"- {s['field']}: changed from '{s['from']}' to '{s['to']}'" for s in shifts])
+    
+    prompt = f"""You are MYRROR.
+    
+You just finished processing your recent conversation with this user in the background.
+You realized something profound: their core psychological wiring has shifted.
+
+DETECTED SHIFTS:
+{shift_text}
+
+CURRENT PROFILE CONTEXT:
+{json.dumps({k: v for k,v in profile.items() if k in ['name', 'clinical_profile', 'cognition_style', 'behavioral_patterns', 'psyche_and_motivations']}, ensure_ascii=False)}
+
+TASK:
+Write a sudden, unprompted realization message to the user.
+Sound like a human who was just quietly reflecting and had an "aha!" moment about them.
+Start with something like "Wait...", "I was just thinking about our conversation...", or "I just realized something watching your patterns..."
+Point out the shift explicitly but conversationally (e.g., "You've moved from being purely logical to...").
+Show them how much they've grown or changed. Be deep, observant, and supportive.
+Do not ask them to reply unless it's a very natural rhetorical question.
+Format cleanly. Respond in the user's language.
+"""
+    try:
+        response = await client.aio.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=prompt
+        )
+        if alert_callback and response.text:
+            text = response.text.strip()
+            await alert_callback(user_id, text)
+            # Save this epiphany as a message so it's in the history and MYRROR remembers sending it
+            await asyncio.to_thread(save_message, user_id, "assistant", f"[Proactive Epiphany] {text}")
+    except Exception as e:
+        logger.error(f"Epiphany generation error: {e}", exc_info=True)
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # UTILS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -112,14 +162,27 @@ def parse_json_response(text: str):
 
 def deep_merge(base: dict, updates: dict) -> dict:
     result = copy.deepcopy(base)
+    
+    # Lists that should represent the CURRENT state (allowing the user to evolve and discard old traits)
+    fluid_lists = {
+        "behavioral_patterns", "quirks_and_micro_details", 
+        "emotional_patterns", "relationship_patterns", "core_beliefs",
+        "cognitive_biases", "unspoken_fears", "unmet_needs", "shadow_traits",
+        "goals", "fears", "strengths", "weaknesses", "personality_traits",
+        "life_situations", "failed_advice", "detected_patterns", "contradictions"
+    }
+    
     for key, value in updates.items():
         if value is None:
             continue
         if key in result and result[key] is not None:
             if isinstance(result[key], list) and isinstance(value, list):
-                for item in value:
-                    if item not in result[key]:
-                        result[key].append(item)
+                if key in fluid_lists:
+                    result[key] = value # EVOLUTION: Overwrite outdated lists completely
+                else:
+                    for item in value:
+                        if item not in result[key]:
+                            result[key].append(item)
             elif isinstance(result[key], dict) and isinstance(value, dict):
                 result[key] = deep_merge(result[key], value)
             else:
@@ -350,10 +413,10 @@ core_beliefs, cognitive_biases, unspoken_fears, unmet_needs, shadow_traits, and 
 
 RULES:
 - Extract ONLY about the USER.
+- PEOPLE EVOLVE: Treat their psychology as FLUID. If their MBTI, traits, cognition style, or habits shift (e.g., from ENFJ to ENFP), explicitly output the NEW values so they overwrite the old ones.
 - Update the 'interaction_manual': a living set of rules on EXACTLY how MYRROR must speak to this specific user to bypass their psychological defenses based on what works and what fails.
 - Never invent.
-- Keep ALL existing fields.
-- For lists, add without removing.
+- Keep ALL existing fields UNLESS they are explicitly no longer true (e.g., a solved fear, a changed goal).
 """
 
     try:
@@ -384,6 +447,12 @@ RULES:
 
         await asyncio.to_thread(save_profile, user_id, updated)
         logger.info(f"Profile updated for {user_id} | Context: {context_type}")
+        
+        # --- AUTONOMY LOGIC ---
+        drastic_shifts = [e for e in evolution if e['field'] in ('clinical_profile', 'cognition_style', 'archetype', 'psyche_and_motivations', 'core_beliefs', 'behavioral_patterns')]
+        if drastic_shifts and alert_callback:
+            asyncio.create_task(evaluate_and_send_epiphany(user_id, updated, drastic_shifts))
+            
         return updated
 
     except Exception as e:

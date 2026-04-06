@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from database import get_profile, get_episodes, get_messages, get_all_people, supabase
 from chat import get_response
 from analyzer import analyze_image, analyze_document, analyze_voice
-from extractor import generate_daily_summary, generate_weekly_summary, run_post_analysis_tasks
+from extractor import generate_daily_summary, generate_weekly_summary, run_post_analysis_tasks, set_alert_callback
 from bot_commands import (get_mood_keyboard, mood_command, sos_command, export_command, help_command, profile_command, evolution_command, episodes_command, people_command, reflect_command, week_command, mood_callback, contract_command, reset_command, flashback_command, dossier_command, setcompass_command)
 from bot_jobs import proactive_check_job, daily_maintenance_job
 from google import genai
@@ -39,6 +39,14 @@ MIN_MESSAGE_LENGTH = 2
 class QuizSchema(BaseModel):
     question: str
     options: list[str] = Field(description="Exactly 4 options")
+
+async def send_proactive_alert(user_id: str, text: str):
+    global telegram_app
+    if telegram_app and telegram_app.bot:
+        try:
+            await telegram_app.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Failed to send proactive alert to {user_id}: {e}")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # COMMANDS
@@ -265,6 +273,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_telegram_bot():
     global telegram_app
     telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    set_alert_callback(send_proactive_alert)
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("quiz", quiz_command))
     telegram_app.add_handler(CallbackQueryHandler(quiz_callback, pattern="^quiz_"))
