@@ -4,7 +4,7 @@ import asyncio
 from google import genai
 from dotenv import load_dotenv
 from prompt import SYSTEM_PROMPT
-from database import get_profile, save_profile, get_messages, get_all_messages, save_message, get_all_people, get_episodes
+from database import get_profile, save_profile, get_messages, get_all_messages, save_message, get_all_people, get_episodes, search_similar_episodes
 from extractor import extract_and_save_profile, get_profile_for_context, compress_history
 import random
 from datetime import datetime
@@ -137,15 +137,22 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
             ctx += f"\n\nTHEIR PERSONAL RULES/CONTRACTS: {contracts}"
             ctx += "\nIf their current message shows they are breaking, ignoring, or making excuses about these rules, CALL THEM OUT directly but naturally in your response."
 
-    # Spontaneous Memories
-    episodes = get_episodes(user_id, limit=50)
-    if episodes:
-        valid_episodes = [ep for ep in episodes if not ep.get("event", "").startswith("Daily summary") and not ep.get("event", "").startswith("Weekly summary")]
-        if len(valid_episodes) >= 3:
-            random_eps = random.sample(valid_episodes, min(3, len(valid_episodes)))
-            eps_text = "\n".join([f"- {ep.get('created_at', '')[:10]}: {ep.get('event')}" for ep in random_eps])
-            ctx += f"\n\nSPONTANEOUS MEMORIES (Random past events):\n{eps_text}"
-            ctx += "\nIf any of these past memories naturally connect to what the user is saying right now, seamlessly bring it up like a real person would ('This reminds me of when you...', 'Like that time...'). If they don't fit, completely ignore them."
+    # Semantic RAG Memory Engine
+    try:
+        emb_res = client.models.embed_content(
+            model="text-embedding-004",
+            contents=content
+        )
+        if emb_res.embeddings:
+            query_embedding = emb_res.embeddings[0].values
+            relevant_episodes = search_similar_episodes(user_id, query_embedding, limit=3)
+            
+            if relevant_episodes:
+                eps_text = "\n".join([f"- {ep.get('created_at', '')[:10]}: {ep.get('event')}" for ep in relevant_episodes])
+                ctx += f"\n\nRELEVANT PAST MEMORIES (Triggered by what the user just said):\n{eps_text}"
+                ctx += "\nIf these past memories naturally connect to the current conversation, seamlessly bring them up ('This reminds me of when you...', 'Like that time...'). If they don't fit perfectly, ignore them."
+    except Exception as e:
+        logger.error(f"RAG search error for {user_id}: {e}", exc_info=True)
 
     # People the user knows
     people = get_all_people(user_id)

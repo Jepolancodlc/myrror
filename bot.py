@@ -521,7 +521,10 @@ async def start_telegram_bot():
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Run the proactive check every 4 hours
-    telegram_app.job_queue.run_repeating(proactive_check_job, interval=3600 * 4)
+    if telegram_app.job_queue:
+        telegram_app.job_queue.run_repeating(proactive_check_job, interval=3600 * 4)
+    else:
+        logger.warning("JobQueue is None. Proactive background jobs are disabled. Install 'python-telegram-bot[job-queue]'.")
     
     await telegram_app.bot.delete_webhook(drop_pending_updates=True)
     await telegram_app.initialize()

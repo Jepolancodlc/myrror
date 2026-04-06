@@ -67,15 +67,18 @@ def save_message(user_id: str, role: str, content: str):
     except Exception as e:
         logger.error(f"save_message error for {user_id}: {e}", exc_info=True)
 
-def save_episode(user_id: str, event: str, domain: str = None, impact: str = None):
+def save_episode(user_id: str, event: str, domain: str = None, impact: str = None, embedding: list = None):
     try:
-        supabase.table("episodes").insert({
+        data = {
             "user_id": user_id,
             "event": event,
             "domain": domain,
             "impact": impact,
             "verified": False
-        }).execute()
+        }
+        if embedding:
+            data["embedding"] = embedding
+        supabase.table("episodes").insert(data).execute()
     except Exception as e:
         logger.error(f"save_episode error for {user_id}: {e}", exc_info=True)
 
@@ -85,6 +88,22 @@ def get_episodes(user_id: str, limit: int = 10) -> list:
         return result.data or []
     except Exception as e:
         logger.error(f"get_episodes error for {user_id}: {e}", exc_info=True)
+        return []
+
+def search_similar_episodes(user_id: str, query_embedding: list, limit: int = 3) -> list:
+    try:
+        response = supabase.rpc(
+            "match_episodes",
+            {
+                "query_embedding": query_embedding,
+                "match_threshold": 0.6, # Solo recuerdos relevantes (60% de similitud o más)
+                "match_count": limit,
+                "p_user_id": user_id
+            }
+        ).execute()
+        return response.data or []
+    except Exception as e:
+        logger.error(f"Vector search error for {user_id}: {e}", exc_info=True)
         return []
 
 def get_person(user_id: str, name: str) -> dict:

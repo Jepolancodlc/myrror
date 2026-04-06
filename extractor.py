@@ -322,11 +322,24 @@ Return ONLY a JSON array. Empty [] if nothing significant.
             return
         for episode in episodes:
             if episode.get("event"):
+                embedding = None
+                try:
+                    # Generamos el vector de memoria usando Gemini
+                    emb_res = client.models.embed_content(
+                        model="text-embedding-004",
+                        contents=episode["event"]
+                    )
+                    if emb_res.embeddings:
+                        embedding = emb_res.embeddings[0].values
+                except Exception as e:
+                    logger.error(f"Embedding error: {e}")
+
                 save_episode(
                     user_id=user_id,
                     event=episode["event"],
                     domain=episode.get("domain"),
-                    impact=episode.get("impact")
+                    impact=episode.get("impact"),
+                    embedding=embedding
                 )
         logger.info(f"Saved {len(episodes)} episodes for {user_id}")
     except Exception as e:
