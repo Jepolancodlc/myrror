@@ -6,10 +6,13 @@ import json
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 from dotenv import load_dotenv
-from database import get_profile, get_episodes, supabase
+from database import get_profile, get_episodes, get_all_messages, get_all_people, get_all_profiles, supabase
 from chat import get_response
-from analyzer import analyze_image, analyze_document
-from extractor import extract_and_save_profile, extract_episodes_from_content
+from analyzer import analyze_image, analyze_document, analyze_voice
+from extractor import (
+    extract_and_save_profile, extract_episodes_from_content, 
+    extract_people, generate_weekly_summary, generate_daily_summary
+)
 from google import genai
 from datetime import datetime
 
@@ -25,7 +28,36 @@ user_pending = {}
 
 COOLDOWN_SECONDS = 3
 MIN_MESSAGE_LENGTH = 2
-TYPING_DELAY = 1.5
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PROACTIVE ENGAGEMENT (BACKGROUND JOB)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
+    """Checks if users have been silent for 3+ days and reaches out to them."""
+    profiles = get_all_profiles()
+    now = datetime.now()
+    
+    for p in profiles:
+        user_id = p["user_id"]
+        data = p.get("data", {})
+        last = data.get("last_conversation")
+        if not last: continue
+        
+        try:
+            last_dt = datetime.strptime(last, "%Y-%m-%d %H:%M")
+            days_silent = (now - last_dt).days
+            
+            # Reach out exactly on the 3rd and 7th day of silence
+            if days_silent in [3, 7]:
+                prompt = f"The user {data.get('name', '')} hasn't spoken to you in {days_silent} days. Write a very short, warm, pressure-free message checking in. Don't ask for a big update, just let them know you're there if they need to talk."
+                response = client.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
+                await context.bot.send_message(chat_id=user_id, text=response.text.strip())
+                # Update last conversation slightly so it doesn't trigger again today
+                data["last_conversation"] = now.strftime("%Y-%m-%d %H:%M")
+                supabase.table("profile").update({"data": data}).eq("user_id", user_id).execute()
+        except Exception as e:
+            logger.error(f"Proactive job error for {user_id}: {e}")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # COMMANDS
@@ -70,7 +102,7 @@ async def episodes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     episodes = get_episodes(user_id, limit=15)
     if not episodes:
-        await update.message.reply_text("No significant episodes recorded yet. Keep talking to me.")
+        await update.message.reply_text("No significant episodes recorded yet.")
         return
     lines = ["Your story so far:\n"]
     for ep in reversed(episodes):
@@ -78,11 +110,26 @@ async def episodes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         event = ep.get("event", "")
         domain = ep.get("domain", "")
         impact = ep.get("impact", "")
-        if not event.startswith("Daily summary"):
+        if not event.startswith("Daily summary") and not event.startswith("Weekly summary"):
             lines.append(f"• {date} [{domain}] {event} ({impact})")
     if len(lines) == 1:
         await update.message.reply_text("No significant episodes recorded yet.")
         return
+    await update.message.reply_text("\n".join(lines))
+
+async def people_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    people = get_all_people(user_id)
+    if not people:
+        await update.message.reply_text("I don't know anyone in your life yet. Tell me about the people around you.")
+        return
+    lines = ["People in your life:\n"]
+    for p in people:
+        name = p.get("name", "")
+        rel = p.get("relationship", "")
+        notes = p.get("notes", {})
+        desc = notes.get("description", "") if isinstance(notes, dict) else ""
+        lines.append(f"• {name} ({rel}){' — ' + desc if desc else ''}")
     await update.message.reply_text("\n".join(lines))
 
 async def reflect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -100,6 +147,7 @@ async def reflect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"- [{ep.get('domain')}] {ep.get('event')} ({ep.get('created_at', '')[:10]})"
         for ep in reversed(episodes)
         if not ep.get("event", "").startswith("Daily summary")
+        and not ep.get("event", "").startswith("Weekly summary")
     ]) or "No significant episodes recorded yet."
 
     prompt = f"""You are MYRROR. Generate a deep, honest reflection for this person.
@@ -110,15 +158,14 @@ PROFILE:
 SIGNIFICANT EPISODES:
 {episodes_text}
 
-Write a personal reflection that covers:
+Write a personal reflection:
 1. Who they are right now — honestly, not flattering
-2. Patterns you've noticed — the ones they might not see
-3. What they've done well recently
-4. What they keep avoiding or postponing
+2. Patterns you've noticed that they might not see
+3. What they've done well
+4. What they keep avoiding
 5. One uncomfortable question they should sit with
 
-Be direct. Be human. Be specific — reference real things from their profile and episodes.
-This is their mirror. Make it worth reading.
+Be direct. Be human. Be specific.
 Respond in the user's language.
 """
 
@@ -131,6 +178,41 @@ Respond in the user's language.
     except Exception as e:
         logger.error(f"Reflect command error: {e}")
         await update.message.reply_text("I had trouble generating your reflection. Try again in a moment.")
+
+async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    profile = get_profile(user_id)
+    messages = get_all_messages(user_id)
+    episodes = get_episodes(user_id, limit=20)
+
+    if not profile and not messages:
+        await update.message.reply_text("Not enough data yet. Keep talking to me.")
+        return
+
+    await update.message.chat.send_action("typing")
+
+    summary = await generate_weekly_summary(user_id, profile, messages, episodes)
+    if summary:
+        await update.message.reply_text(summary)
+    else:
+        await update.message.reply_text("I had trouble generating your weekly summary. Try again in a moment.")
+
+async def checkin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    profile = get_profile(user_id)
+    name = profile.get("name", "")
+
+    greeting = f"Hey{' ' + name if name else'}'}."
+
+    hour = datetime.now().hour
+    if hour < 12:
+        time_ref = "this morning"
+    elif hour < 18:
+        time_ref = "today"
+    else:
+        time_ref = "tonight"
+
+    await update.message.reply_text(f"{greeting} How are you doing {time_ref}?")
 
 async def contract_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -163,10 +245,6 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def check_relapses(profile: dict) -> list:
-    """
-    Check if user is silently breaking their personal contracts.
-    Returns list of relapse warnings.
-    """
     contracts = profile.get("personal_contracts", [])
     if not contracts:
         return []
@@ -182,7 +260,6 @@ def check_relapses(profile: dict) -> list:
         return []
 
     warnings = []
-
     gym_keywords = ["gym", "gimnasio", "workout", "ejercicio", "exercise", "training"]
     study_keywords = ["study", "estudiar", "learn", "aprender", "code", "coding"]
     porn_keywords = ["porn", "porno", "nofap", "no fap"]
@@ -191,12 +268,10 @@ def check_relapses(profile: dict) -> list:
 
     if any(kw in contracts_text for kw in gym_keywords) and days_since >= 3:
         warnings.append(f"You committed to the gym but haven't mentioned it in {days_since} days.")
-
     if any(kw in contracts_text for kw in study_keywords) and days_since >= 3:
         warnings.append(f"You committed to studying but haven't mentioned it in {days_since} days.")
-
     if any(kw in contracts_text for kw in porn_keywords) and days_since >= 1:
-        warnings.append(f"You made a commitment about this. How is it going?")
+        warnings.append(f"You made a commitment. How is it going?")
 
     return warnings
 
@@ -219,6 +294,21 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Image handler error for {user_id}: {e}", exc_info=True)
         await update.message.reply_text("I had trouble reading that image. Try again in a moment.")
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    await update.message.chat.send_action("typing")
+    voice = update.message.voice
+    file = await context.bot.get_file(voice.file_id)
+    file_bytes = await file.download_as_bytearray()
+    try:
+        text = await analyze_voice(user_id, file_bytes, voice.mime_type or "audio/ogg")
+        if text:
+            content = f"[Voice Message] {text}"
+            await process_message(update, user_id, content, False)
+    except Exception as e:
+        logger.error(f"Voice handler error for {user_id}: {e}", exc_info=True)
+        await update.message.reply_text("I had trouble listening to your voice message. Can you type it?")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -251,8 +341,7 @@ async def process_message(update: Update, user_id: str, content: str, is_new_ses
     try:
         profile = get_profile(user_id)
 
-        # Check relapses on first message of the day
-        hour = datetime.now().hour
+        # Check if first message of the day
         last = profile.get("last_conversation", "")
         is_first_today = False
         if last:
@@ -262,22 +351,30 @@ async def process_message(update: Update, user_id: str, content: str, is_new_ses
             except:
                 pass
 
-        text = get_response(user_id, content, is_new_session)
+        text = await get_response(user_id, content, is_new_session)
         await update.message.reply_text(text)
-
-        # Night mode — subtle tone shift after 11pm
-        if hour >= 23 or hour <= 5:
-            logger.info(f"Night mode active for {user_id}")
 
         # Relapse check on first message of the day
         if is_first_today:
             warnings = check_relapses(profile)
             if warnings:
-                warning_text = "\n\n" + "\n".join(f"— {w}" for w in warnings)
+                warning_text = "\n".join(f"— {w}" for w in warnings)
                 await update.message.reply_text(warning_text)
 
-        asyncio.create_task(extract_and_save_profile(user_id, "message", content, text, profile))
+            # Daily summary of yesterday
+            messages = get_all_messages(user_id)
+            if messages:
+                asyncio.create_task(generate_daily_summary(user_id, profile, messages))
+
+        # Learn from message
         asyncio.create_task(extract_episodes_from_content(user_id, content, text))
+        asyncio.create_task(extract_people(user_id, content, text))
+
+        # Weekly summary on Sundays
+        if datetime.now().weekday() == 6 and is_first_today:
+            messages = get_all_messages(user_id)
+            episodes = get_episodes(user_id, limit=20)
+            asyncio.create_task(generate_weekly_summary(user_id, profile, messages, episodes))
 
     except Exception as e:
         logger.error(f"Message processing error for {user_id}: {e}", exc_info=True)
@@ -300,7 +397,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_new_session = user_sessions.pop(user_id, False)
 
     async def debounced():
-        await asyncio.sleep(TYPING_DELAY)
+        # Simulate human reading time based on message length (min 1s, max 4s)
+        reading_delay = max(1.0, min(len(content) * 0.02, 4.0))
+        await asyncio.sleep(reading_delay)
         await process_message(update, user_id, content, is_new_session)
 
     task = asyncio.create_task(debounced())
@@ -325,12 +424,22 @@ def run_telegram_bot():
         telegram_app.add_handler(CommandHandler("profile", profile_command))
         telegram_app.add_handler(CommandHandler("evolution", evolution_command))
         telegram_app.add_handler(CommandHandler("episodes", episodes_command))
+        telegram_app.add_handler(CommandHandler("people", people_command))
         telegram_app.add_handler(CommandHandler("reflect", reflect_command))
+        telegram_app.add_handler(CommandHandler("week", week_command))
+        telegram_app.add_handler(CommandHandler("checkin", checkin_command))
         telegram_app.add_handler(CommandHandler("contract", contract_command))
         telegram_app.add_handler(CommandHandler("reset", reset_command))
+        telegram_app.add_handler(CommandHandler("mood", mood_command))
+        telegram_app.add_handler(CommandHandler("sos", sos_command))
+        telegram_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
         telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_image))
         telegram_app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
         telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        # Run the proactive check every 12 hours
+        telegram_app.job_queue.run_repeating(proactive_check_job, interval=3600 * 12)
+        
         await telegram_app.initialize()
         await telegram_app.start()
         await telegram_app.updater.start_polling()

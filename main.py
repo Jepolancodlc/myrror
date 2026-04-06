@@ -33,8 +33,8 @@ def health():
     return {"status": "alive"}
 
 @app.post("/chat")
-def chat(message: Message):
-    text = get_response(message.user_id, message.content, message.new_session)
+async def chat(message: Message):
+    text = await get_response(message.user_id, message.content, message.new_session)
     return {"response": text}
 
 @app.on_event("startup")

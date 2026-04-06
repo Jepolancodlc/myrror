@@ -101,3 +101,22 @@ INSTRUCTIONS:
     except Exception as e:
         logger.error(f"Document analysis error for {user_id}: {e}", exc_info=True)
         raise
+
+async def analyze_voice(user_id: str, file_bytes: bytearray, mime: str) -> str:
+    audio_base64 = base64.b64encode(file_bytes).decode("utf-8")
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=[
+                {
+                    "parts": [
+                        {"text": "Transcribe this audio message exactly as spoken in its original language. Do not answer it or summarize it, return ONLY the raw transcription."},
+                        {"inline_data": {"mime_type": mime, "data": audio_base64}}
+                    ]
+                }
+            ]
+        )
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"Voice analysis error for {user_id}: {e}", exc_info=True)
+        raise

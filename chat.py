@@ -4,8 +4,8 @@ import asyncio
 from google import genai
 from dotenv import load_dotenv
 from prompt import SYSTEM_PROMPT
-from database import get_profile, save_profile, get_messages, save_message
-from extractor import extract_profile, get_profile_for_context
+from database import get_profile, save_profile, get_messages, get_all_messages, save_message, get_all_people
+from extractor import extract_and_save_profile, get_profile_for_context, compress_history
 from datetime import datetime
 
 load_dotenv()
@@ -24,7 +24,6 @@ def detect_crisis(content: str, history: list, profile: dict) -> bool:
 
     content_lower = content.lower()
     keyword_hit = any(kw in content_lower for kw in crisis_keywords)
-
     hour = datetime.now().hour
     unusual_hour = hour >= 23 or hour <= 5
 
@@ -86,9 +85,10 @@ One sentence only.
         logger.error(f"Context analysis error: {e}")
         return ""
 
-def get_response(user_id: str, content: str, new_session: bool = False) -> str:
+async def get_response(user_id: str, content: str, new_session: bool = False) -> str:
     profile = get_profile(user_id)
-    history = get_messages(user_id)
+    all_messages = get_all_messages(user_id)
+    recent_history = all_messages[-10:] if all_messages else []
 
     ctx = SYSTEM_PROMPT
 
@@ -103,7 +103,7 @@ def get_response(user_id: str, content: str, new_session: bool = False) -> str:
         ctx += "\n\nThe user explicitly started a new session."
 
     # Crisis detection
-    in_crisis = detect_crisis(content, history, profile)
+    in_crisis = detect_crisis(content, recent_history, profile)
     if in_crisis:
         ctx += "\n\nCRISIS MODE: The user may be struggling right now. Do NOT analyze, push, or give advice. Only listen. Be warm, present, and human. Ask one simple question: are they okay. If things seem serious, gently mention that talking to someone real can help."
 
@@ -111,23 +111,57 @@ def get_response(user_id: str, content: str, new_session: bool = False) -> str:
     if profile:
         ctx += f"\n\nWHAT YOU KNOW ABOUT THIS USER:\n{get_profile_for_context(profile, content)}"
 
-    # Conversational context
-    if history and len(history) >= 2:
+        comm_style = profile.get("communication_style")
+        humor = profile.get("humor_style")
+        tone = profile.get("preferred_tone")
+        if comm_style or humor or tone:
+            ctx += "\n\nCRITICAL - ADAPT YOUR PERSONA TO MATCH THIS USER:"
+            if comm_style: ctx += f"\n- Their Communication Style: {comm_style}"
+            if humor: ctx += f"\n- Their Humor Style: {humor}"
+            if tone: ctx += f"\n- Their Preferred Tone: {tone}"
+            ctx += "\nModify your vocabulary, sentence length, and warmth to match this perfectly. Mirror their energy."
+            
+        events = profile.get("upcoming_events")
+        if events:
+            ctx += f"\n\nUPCOMING EVENTS ON THEIR RADAR: {events}"
+            ctx += "\nIf any of these seem relevant to the current timeframe, SPONTANEOUSLY bring them up. (e.g., 'By the way, did you end up having that meeting?')"
+            
+        compass = profile.get("life_compass")
+        if compass:
+            ctx += f"\n\nTHEIR LIFE COMPASS (What grounds them / gives them meaning): {compass}"
+            ctx += "\nIf the user feels lost, drifting, or hopeless, gently remind them of this core purpose. Guide them back to their center."
+
+    # People the user knows
+    people = get_all_people(user_id)
+    if people:
+        people_summary = "\n".join([
+            f"- {p['name']} ({p.get('relationship', 'unknown')}): {p.get('notes', {}).get('description', '')}"
+            for p in people
+        ])
+        ctx += f"\n\nPEOPLE IN THEIR LIFE:\n{people_summary}"
+
+    # Smart history — compress older messages
+    if len(all_messages) > 10:
         try:
-            loop = asyncio.get_event_loop()
-            if not loop.is_running():
-                conv_ctx = loop.run_until_complete(
-                    analyze_conversation_context(content, history)
-                )
-                if conv_ctx:
-                    ctx += f"\n\nCONVERSATIONAL CONTEXT: {conv_ctx}"
+            compressed = await compress_history(user_id, all_messages)
+            if compressed:
+                ctx += f"\n\nEARLIER CONVERSATION SUMMARY:\n{compressed}"
+        except Exception as e:
+            logger.error(f"History compression error: {e}")
+
+    # Conversational context
+    if recent_history and len(recent_history) >= 2:
+        try:
+            conv_ctx = await analyze_conversation_context(content, recent_history)
+            if conv_ctx:
+                ctx += f"\n\nCONVERSATIONAL CONTEXT: {conv_ctx}"
         except Exception as e:
             logger.error(f"Conversation context error: {e}")
 
-    # Recent history
-    if history:
+    # Recent history — last 10 only
+    if recent_history:
         ctx += "\n\nRECENT HISTORY:\n"
-        for msg in history:
+        for msg in recent_history:
             role = "User" if msg["role"] == "user" else "MYRROR"
             ctx += f"{role}: {msg['content']}\n"
 
@@ -144,7 +178,11 @@ def get_response(user_id: str, content: str, new_session: bool = False) -> str:
         raise
 
     try:
-        updated_profile = extract_profile(profile, content, text)
+        updated_profile = await extract_and_save_profile(user_id, "message", content, text, profile)
+        if in_crisis:
+            updated_profile["last_crisis"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        else:
+            updated_profile.pop("crisis_checked", None)
         save_profile(user_id, updated_profile)
     except Exception as e:
         logger.error(f"Profile update error for {user_id}: {e}", exc_info=True)
