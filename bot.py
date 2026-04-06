@@ -4,20 +4,20 @@ import time
 import asyncio
 import json
 import random
+import math
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from dotenv import load_dotenv
-from database import get_profile, get_episodes, get_messages, get_all_people, get_all_profiles, supabase
+from database import get_profile, get_episodes, get_messages, get_all_people, supabase
 from chat import get_response
 from analyzer import analyze_image, analyze_document, analyze_voice
-from extractor import (
-    extract_and_save_profile, extract_episodes_from_content,
-    track_evolution,
-    extract_people, generate_weekly_summary, generate_daily_summary
-)
+from extractor import generate_daily_summary, generate_weekly_summary, run_post_analysis_tasks
+from bot_commands import (get_mood_keyboard, mood_command, sos_command, export_command, help_command, profile_command, evolution_command, episodes_command, people_command, reflect_command, week_command, mood_callback, contract_command, reset_command, flashback_command, dossier_command, setcompass_command)
+from bot_jobs import proactive_check_job, daily_maintenance_job
 from google import genai
 from google.genai import types
+from pydantic import BaseModel, Field
 from datetime import datetime
 
 load_dotenv()
@@ -27,158 +27,18 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 user_sessions = {}
-user_last_message = {}
 user_pending = {}
+user_message_buffers = {}
+user_quiz_options = {}
+telegram_app = None
 
 COOLDOWN_SECONDS = 3
 MIN_MESSAGE_LENGTH = 2
 
-def get_mood_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("1 ⬛", callback_data="mood_1"),
-            InlineKeyboardButton("2", callback_data="mood_2"),
-            InlineKeyboardButton("3", callback_data="mood_3"),
-            InlineKeyboardButton("4", callback_data="mood_4"),
-            InlineKeyboardButton("5 🟨", callback_data="mood_5"),
-        ],
-        [
-            InlineKeyboardButton("6", callback_data="mood_6"),
-            InlineKeyboardButton("7", callback_data="mood_7"),
-            InlineKeyboardButton("8", callback_data="mood_8"),
-            InlineKeyboardButton("9", callback_data="mood_9"),
-            InlineKeyboardButton("10 🟩", callback_data="mood_10"),
-        ]
-    ])
 
-async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    profile = await asyncio.to_thread(get_profile, user_id)
-    evolution = profile.get("evolution", [])
-
-    mood_data = [e for e in evolution if e.get("field") == "current_mood_score"]
-    if len(mood_data) < 2:
-        await update.message.reply_text("I need more conversations with you to track your mood evolution. Keep talking to me!")
-        return
-
-    try:
-        import matplotlib.pyplot as plt
-        import io
-        
-        dates = [e["date"][5:] for e in mood_data[-14:]] # Last 14 changes
-        scores = [float(str(e["to"]).replace(',', '.')) for e in mood_data[-14:] if str(e["to"]).replace('.', '', 1).isdigit()]
-
-        plt.figure(figsize=(8, 4))
-        plt.plot(dates[:len(scores)], scores, marker='o', color='#4A90E2', linestyle='-', linewidth=2)
-        plt.ylim(0, 10)
-        plt.title("Your Emotional Evolution")
-        plt.ylabel("Mood Score (1-10)")
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
-        plt.tight_layout()
-
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png')
-        buf.seek(0)
-        plt.close()
-
-        await update.message.reply_photo(photo=buf, caption="Here is how your mood has been trending.")
-    except ImportError:
-        await update.message.reply_text("Visual tracking requires matplotlib. (Run: pip install matplotlib)")
-    except Exception as e:
-        logger.error(f"Mood graph error: {e}")
-        await update.message.reply_text("I couldn't generate the mood graph right now.")
-
-async def sos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "🚨 **CRISIS RESOURCES** 🚨\n\n"
-        "I am an AI. I care about you, but I cannot replace real medical or psychological help.\n"
-        "If you feel you are in danger, please reach out to humans who can help you right now:\n\n"
-        "• **Emergency:** Call 112 (Europe) or 911 (Americas).\n"
-        "• **Crisis Text Line:** Text HOME to 741741\n"
-        "• **Global Helplines:** https://findahelpline.com/\n\n"
-        "You are not alone. Please talk to a professional."
-    )
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    profile = await asyncio.to_thread(get_profile, user_id)
-    episodes = await asyncio.to_thread(get_episodes, user_id, limit=100)
-    
-    data = {"profile": profile, "episodes": episodes}
-    file_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
-    
-    await update.message.reply_document(
-        document=file_bytes,
-        filename=f"myrror_backup.json",
-        caption="Here is a complete backup of your psychological profile and episodes."
-    )
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PROACTIVE ENGAGEMENT (BACKGROUND JOB)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
-    """Checks if users have been silent for 3+ days and reaches out to them."""
-    profiles = await asyncio.to_thread(get_all_profiles)
-    now = datetime.now()
-    
-    for p in profiles:
-        user_id = p["user_id"]
-        data = p.get("data", {})
-        last = data.get("last_conversation")
-        if not last: continue
-        
-        try:
-            last_dt = datetime.strptime(last, "%Y-%m-%d %H:%M")
-            days_silent = (now - last_dt).days
-            
-            # Reach out exactly on the 3rd and 7th day of silence
-            if days_silent in [3, 7, 14]:
-                # Simulate human typing delay
-                await context.bot.send_chat_action(chat_id=user_id, action="typing")
-                await asyncio.sleep(random.uniform(2.5, 5.0))
-                
-                if days_silent == 14:
-                    prompt = f"The user {data.get('name', '')} has completely isolated themselves and ignored your check-ins for 2 weeks. Write a slightly more direct, 'tough love' but deeply caring message. Acknowledge that they are hiding/withdrawing, and tell them you are not going anywhere and will be here when they are ready to face things."
-                else:
-                    prompt = f"The user {data.get('name', '')} hasn't spoken to you in {days_silent} days. Write a very short, warm, pressure-free message checking in. Don't ask for a big update, just let them know you're there if they need to talk."
-                
-                response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
-                await context.bot.send_message(chat_id=user_id, text=response.text.strip())
-                # Update last conversation slightly so it doesn't trigger again today
-                data["last_conversation"] = now.strftime("%Y-%m-%d %H:%M")
-                await asyncio.to_thread(lambda: supabase.table("profile").update({"data": data}).eq("user_id", user_id).execute())
-        except Exception as e:
-            logger.error(f"Proactive job error for {user_id}: {e}")
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# DAILY MAINTENANCE (BACKGROUND JOB)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-async def daily_maintenance_job(context: ContextTypes.DEFAULT_TYPE):
-    """Runs daily to self-heal the semantic memory (generate missing embeddings)."""
-    profiles = await asyncio.to_thread(get_all_profiles)
-    from database import get_null_episodes, update_episode_embedding
-    for p in profiles:
-        user_id = p["user_id"]
-        episodes = await asyncio.to_thread(get_null_episodes, user_id)
-        if not episodes: continue
-        
-        fixed = 0
-        for ep in episodes:
-            event = ep.get("event")
-            if not event: continue
-            try:
-                emb_res = await client.aio.models.embed_content(model="text-embedding-004", contents=event)
-                if emb_res.embeddings:
-                    await asyncio.to_thread(update_episode_embedding, ep["id"], emb_res.embeddings[0].values)
-                    fixed += 1
-                    await asyncio.sleep(0.5) # Anti-rate limit protection
-            except Exception as e:
-                logger.error(f"Failed to fix memory {ep['id']}: {e}")
-        if fixed > 0:
-            logger.info(f"Auto-maintenance: Restored {fixed} fragmented memories for {user_id}.")
+class QuizSchema(BaseModel):
+    question: str
+    options: list[str] = Field(description="Exactly 4 options")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # COMMANDS
@@ -199,231 +59,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome_text)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "Here is what you can ask me to do:\n\n"
-        "🧠 **Self-Discovery**\n"
-        "• /profile - See what I know about your personality & goals\n"
-        "• /evolution - Track how you've changed over time\n"
-        "• /episodes - View the significant moments of your life\n"
-        "• /people - See who I remember from your stories\n"
-        "• /mood - View a visual graph of your emotional evolution\n\n"
-        "🪞 **Reflection & Action**\n"
-        "• /reflect - Ask for a deep, honest reflection on where you are\n"
-        "• /flashback - Revisit a random past memory we've discussed\n"
-        "• /week - Get a summary of your week's patterns and commitments\n"
-        "• /contract - See the personal rules you've asked me to hold you to\n\n"
-        "⚙️ **System & Support**\n"
-        "• /sos - Get emergency resources if you're in crisis\n"
-        "• /export - Download a full backup of your data\n"
-        "• /reset - Erase all your history and start completely fresh"
-    )
-    await update.message.reply_text(text, parse_mode="Markdown")
 
-async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PSYCHOLOGICAL QUIZ
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     profile = await asyncio.to_thread(get_profile, user_id)
-    if not profile:
-        await update.message.reply_text("I don't know anything about you yet. Talk to me first.")
-        return
-    skip = ["evolution", "confidence", "last_conversation", "total_conversations"]
-    lines = ["Here's what I know about you:\n"]
-    for key, value in profile.items():
-        if key not in skip and value:
-            lines.append(f"• {key}: {value}")
-    if "last_conversation" in profile:
-        lines.append(f"\nLast conversation: {profile['last_conversation']}")
-    if "total_conversations" in profile:
-        lines.append(f"Total conversations: {profile['total_conversations']}")
-    await update.message.reply_text("\n".join(lines))
+    await update.message.chat.send_action("typing")
 
-async def evolution_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    profile = await asyncio.to_thread(get_profile, user_id)
-    evolution = profile.get("evolution", [])
-    if not evolution:
-        await update.message.reply_text("No changes tracked yet. Keep talking to me.")
-        return
-    lines = ["Your evolution over time:\n"]
-    for e in evolution[-10:]:
-        lines.append(f"• {e['date']} — {e['field']}: {e['note']}")
-    await update.message.reply_text("\n".join(lines))
-
-async def episodes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    episodes = await asyncio.to_thread(get_episodes, user_id, limit=15)
-    if not episodes:
-        await update.message.reply_text("No significant episodes recorded yet.")
-        return
-    lines = ["Your story so far:\n"]
-    for ep in reversed(episodes):
-        date = ep.get("created_at", "")[:10]
-        event = ep.get("event", "")
-        domain = ep.get("domain", "")
-        impact = ep.get("impact", "")
-        if not event.startswith("Daily summary") and not event.startswith("Weekly summary"):
-            lines.append(f"• {date} [{domain}] {event} ({impact})")
-    if len(lines) == 1:
-        await update.message.reply_text("No significant episodes recorded yet.")
-        return
-    await update.message.reply_text("\n".join(lines))
-
-async def people_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    people = await asyncio.to_thread(get_all_people, user_id)
-    if not people:
-        await update.message.reply_text("I don't know anyone in your life yet. Tell me about the people around you.")
-        return
-    lines = ["People in your life:\n"]
-    for p in people:
-        name = p.get("name", "")
-        rel = p.get("relationship", "")
-        notes = p.get("notes", {})
-        desc = notes.get("description", "") if isinstance(notes, dict) else ""
-        lines.append(f"• {name} ({rel}){' — ' + desc if desc else ''}")
-    await update.message.reply_text("\n".join(lines))
-
-async def reflect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    profile = await asyncio.to_thread(get_profile, user_id)
-    episodes = await asyncio.to_thread(get_episodes, user_id, limit=20)
-
-    if not profile:
-        await update.message.reply_text("I don't know you well enough yet. Talk to me more first.")
-        return
-
-    status_msg = await update.message.reply_text("🪞 *Reflecting on your journey...*", parse_mode="Markdown")
-
-    episodes_text = "\n".join([
-        f"- [{ep.get('domain')}] {ep.get('event')} ({ep.get('created_at', '')[:10]})"
-        for ep in reversed(episodes)
-        if not ep.get("event", "").startswith("Daily summary")
-        and not ep.get("event", "").startswith("Weekly summary")
-    ]) or "No significant episodes recorded yet."
-
-    prompt = f"""You are MYRROR. Generate a deep, honest reflection for this person.
-
-PROFILE:
-{json.dumps(profile, ensure_ascii=False, separators=(',', ':'))}
-
-SIGNIFICANT EPISODES:
-{episodes_text}
-
-Write a personal reflection:
-1. Who they are right now — honestly, not flattering
-2. Patterns you've noticed that they might not see
-3. What they've done well
-4. What they keep avoiding
-5. One uncomfortable question they should sit with
-
-Be direct. Be human. Be specific.
-Respond in the user's language.
-"""
-
+    prompt = f"""Generate a deep, engaging psychological multiple-choice question to learn something new about this user.
+Make it practical, situational, or metaphoric. Target their blind spots or shadow traits.
+User Profile: {json.dumps(profile)}"""
     try:
         response = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
-            contents=prompt
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=QuizSchema
+            )
         )
-        await status_msg.edit_text(response.text)
+        data = json.loads(response.text)
+        
+        keyboard = []
+        for i, opt in enumerate(data["options"]):
+            keyboard.append([InlineKeyboardButton(opt[:50] + ("..." if len(opt)>50 else ""), callback_data=f"quiz_{i}")])
+        
+        user_quiz_options[user_id] = data["options"]
+        await update.message.reply_text(f"🧠 **MYRROR Test**\n\n{data['question']}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Reflect command error: {e}")
-        await status_msg.edit_text("I had trouble generating your reflection. Try again in a moment.")
+        logger.error(f"Quiz error: {e}")
+        await update.message.reply_text("I couldn't generate a quiz right now.")
 
-async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    profile = await asyncio.to_thread(get_profile, user_id)
-    messages = await asyncio.to_thread(get_messages, user_id, 40)
-    episodes = await asyncio.to_thread(get_episodes, user_id, limit=20)
-
-    if not profile and not messages:
-        await update.message.reply_text("Not enough data yet. Keep talking to me.")
-        return
-
-    status_msg = await update.message.reply_text("📅 *Reviewing your week...*", parse_mode="Markdown")
-
-    summary = await generate_weekly_summary(user_id, profile, messages, episodes)
-    if summary:
-        await status_msg.edit_text(summary)
-    else:
-        await status_msg.edit_text("I had trouble generating your weekly summary. Try again in a moment.")
-
-async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = str(query.from_user.id)
-    mood_val = query.data.split("_")[1]
+    idx = int(query.data.split("_")[1])
     
-    profile = await asyncio.to_thread(get_profile, user_id)
-    new_data = {"current_mood_score": int(mood_val)}
+    options = user_quiz_options.get(user_id, [])
+    chosen = options[idx] if idx < len(options) else "An unknown option"
     
-    evolution = track_evolution(profile, new_data)
-    profile["current_mood_score"] = int(mood_val)
-    if evolution:
-        profile["evolution"] = evolution
-        
-    from database import save_profile
-    await asyncio.to_thread(save_profile, user_id, profile)
+    await query.edit_message_text(text=f"{query.message.text}\n\n✅ **You chose:** {chosen}", parse_mode="Markdown")
     
-    response_texts = {
-        "low": "You clicked low... I'm sorry things are heavy right now. I'm here if you want to vent.",
-        "mid": "Right down the middle. Surviving the day. Anything specific on your mind?",
-        "high": "Glad to see you're doing well! Tell me what's making it a good day."
-    }
-    val = int(mood_val)
-    category = "low" if val <= 4 else ("mid" if val <= 7 else "high")
-    
-    await query.edit_message_text(text=f"Mood recorded: {mood_val}/10.\n\n{response_texts[category]}")
-
-async def contract_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    profile = await asyncio.to_thread(get_profile, user_id)
-    contracts = profile.get("personal_contracts", None)
-    if not contracts:
-        await update.message.reply_text(
-            "No personal contracts yet.\n\n"
-            "Tell me something like:\n"
-            "'Don't let me justify skipping the gym'\n"
-            "I'll remember and enforce it."
-        )
-        return
-    lines = ["Your personal contracts:\n"]
-    if isinstance(contracts, list):
-        for c in contracts:
-            lines.append(f"• {c}")
-    else:
-        lines.append(str(contracts))
-    await update.message.reply_text("\n".join(lines))
-
-async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    await asyncio.to_thread(lambda: supabase.table("profile").delete().eq("user_id", user_id).execute())
-    await asyncio.to_thread(lambda: supabase.table("messages").delete().eq("user_id", user_id).execute())
-    await update.message.reply_text("Profile and history cleared. Starting fresh.")
-
-async def flashback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    episodes = await asyncio.to_thread(get_episodes, user_id, limit=50)
-    
-    # Skip recent ones and system summaries
-    valid_episodes = [ep for ep in episodes[10:] if not ep.get("event", "").startswith("Daily summary") and not ep.get("event", "").startswith("Weekly summary")]
-    
-    if not valid_episodes:
-        await update.message.reply_text("We haven't shared enough history yet for a flashback. Let's make some memories first.")
-        return
-        
-    episode = random.choice(valid_episodes)
-    event = episode.get("event", "")
-    date = episode.get("created_at", "")[:10]
-    
-    prompt = f"The user experienced this event on {date}: '{event}'. Ask a deeply thoughtful, curious question about how they feel about it now, or how it shaped them since then. Keep it to one brief paragraph."
-    await update.message.chat.send_action("typing")
-    try:
-        response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
-        await update.message.reply_text(response.text.strip())
-    except Exception as e:
-        logger.error(f"Flashback error: {e}")
-        await update.message.reply_text(f"I was just thinking about when you mentioned: '{event}' ({date}). How do you feel about that now?")
+    content = f"[Quiz Answer] I chose: {chosen}"
+    await process_message(update, user_id, content, False)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # RELAPSE DETECTION
@@ -443,10 +125,8 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("👁️ *Analyzing image...*", parse_mode="Markdown")
     try:
         text = await analyze_image(user_id, file_bytes, caption)
-        profile = get_profile(user_id)
-        asyncio.create_task(extract_and_save_profile(user_id, "image", caption, text, profile))
-        asyncio.create_task(extract_episodes_from_content(user_id, f"Image: {caption}", text))
-        asyncio.create_task(extract_people(user_id, f"Image: {caption}", text))
+        profile = await asyncio.to_thread(get_profile, user_id)
+        asyncio.create_task(run_post_analysis_tasks(user_id, "image", f"Image: {caption}", text, profile))
         await status_msg.edit_text(text)
     except Exception as e:
         logger.error(f"Image handler error for {user_id}: {e}", exc_info=True)
@@ -483,10 +163,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             await status_msg.edit_text("I can't read that file type yet. Try .txt, .pdf, or an image.")
             return
-        profile = get_profile(user_id)
-        asyncio.create_task(extract_and_save_profile(user_id, f"file:{document.file_name}", caption, text, profile))
-        asyncio.create_task(extract_episodes_from_content(user_id, f"File: {caption}", text))
-        asyncio.create_task(extract_people(user_id, f"File: {document.file_name} - {caption}", text))
+        profile = await asyncio.to_thread(get_profile, user_id)
+        asyncio.create_task(run_post_analysis_tasks(user_id, f"file:{document.file_name}", f"File: {caption}", text, profile))
         await status_msg.edit_text(text)
     except Exception as e:
         logger.error(f"Document handler error for {user_id}: {e}", exc_info=True)
@@ -500,7 +178,7 @@ async def process_message(update: Update, user_id: str, content: str, is_new_ses
     await update.message.chat.send_action("typing")
 
     try:
-        profile = get_profile(user_id)
+        profile = await asyncio.to_thread(get_profile, user_id)
 
         # Check if first message of the day
         last = profile.get("last_conversation", "")
@@ -531,10 +209,6 @@ async def process_message(update: Update, user_id: str, content: str, is_new_ses
             if messages:
                 asyncio.create_task(generate_daily_summary(user_id, profile, messages))
 
-        # Learn from message
-        asyncio.create_task(extract_episodes_from_content(user_id, content, text))
-        asyncio.create_task(extract_people(user_id, content, text))
-
         # Weekly summary on Sundays
         if datetime.now().weekday() == 6 and is_first_today:
             messages = await asyncio.to_thread(get_messages, user_id, 40)
@@ -552,47 +226,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(content) < MIN_MESSAGE_LENGTH:
         return
 
-    now = time.time()
-    last = user_last_message.get(user_id, 0)
-    if now - last < COOLDOWN_SECONDS:
-        if user_id in user_pending:
-            user_pending[user_id].cancel()
+    # Add message to the user's temporary burst buffer
+    if user_id not in user_message_buffers:
+        user_message_buffers[user_id] = []
+    user_message_buffers[user_id].append(content)
 
-    user_last_message[user_id] = now
-    is_new_session = user_sessions.pop(user_id, False)
+    if user_id in user_pending:
+        user_pending[user_id].cancel()
 
     async def debounced():
-        await update.message.chat.send_action("typing")
-        # Simulate human reading time based on message length (min 1s, max 4s)
-        reading_delay = max(1.0, min(len(content) * 0.02, 4.0))
-        await asyncio.sleep(reading_delay)
-        await process_message(update, user_id, content, is_new_session)
+        try:
+            await asyncio.sleep(COOLDOWN_SECONDS)
+            
+            await update.message.chat.send_action("typing")
+            
+            is_new_session = user_sessions.pop(user_id, False)
+            combined_content = "\n".join(user_message_buffers[user_id])
+            is_burst = len(user_message_buffers[user_id]) > 2
+            user_message_buffers[user_id] = [] # Limpiar el búfer
+            
+            final_content = combined_content
+            if is_burst:
+                final_content = f"[RAPID BURST OF MESSAGES - VENTING DETECTED]\n{combined_content}"
+            
+            await process_message(update, user_id, final_content, is_new_session)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if user_pending.get(user_id) == asyncio.current_task():
+                del user_pending[user_id]
 
-    task = asyncio.create_task(debounced())
-    user_pending[user_id] = task
-
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    finally:
-        if user_pending.get(user_id) == task:
-            del user_pending[user_id]
+    user_pending[user_id] = asyncio.create_task(debounced())
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # BOT STARTUP
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def start_telegram_bot():
+    global telegram_app
     telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("quiz", quiz_command))
+    telegram_app.add_handler(CallbackQueryHandler(quiz_callback, pattern="^quiz_"))
     telegram_app.add_handler(CallbackQueryHandler(mood_callback, pattern="^mood_"))
     telegram_app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(CommandHandler("dossier", dossier_command))
     telegram_app.add_handler(CommandHandler("profile", profile_command))
     telegram_app.add_handler(CommandHandler("evolution", evolution_command))
     telegram_app.add_handler(CommandHandler("episodes", episodes_command))
     telegram_app.add_handler(CommandHandler("people", people_command))
     telegram_app.add_handler(CommandHandler("reflect", reflect_command))
+    telegram_app.add_handler(CommandHandler("setcompass", setcompass_command))
     telegram_app.add_handler(CommandHandler("flashback", flashback_command))
     telegram_app.add_handler(CommandHandler("week", week_command))
     telegram_app.add_handler(CommandHandler("contract", contract_command))
@@ -618,3 +302,11 @@ async def start_telegram_bot():
     await telegram_app.start()
     await telegram_app.updater.start_polling()
     logger.info("Telegram bot started successfully in the main event loop.")
+
+async def stop_telegram_bot():
+    global telegram_app
+    if telegram_app:
+        if telegram_app.updater:
+            await telegram_app.updater.stop()
+        await telegram_app.stop()
+        await telegram_app.shutdown()

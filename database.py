@@ -7,13 +7,19 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-supabase = create_client(
-    os.getenv("SUPABASE_URL"),
-    os.getenv("SUPABASE_KEY")
-)
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    logger.error("CRITICAL: SUPABASE_URL or SUPABASE_KEY is missing in environment variables. Database will fail.")
+    # Prevent crash on import, but queries will fail gracefully.
+    supabase = None
+else:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def get_profile(user_id: str) -> dict:
     try:
+        if not supabase: return {}
         result = supabase.table("profile").select("*").eq("user_id", user_id).execute()
         if result.data:
             return result.data[0]["data"]
@@ -24,6 +30,7 @@ def get_profile(user_id: str) -> dict:
 
 def save_profile(user_id: str, data: dict):
     try:
+        if not supabase: return
         existing = supabase.table("profile").select("*").eq("user_id", user_id).execute()
         if existing.data:
             supabase.table("profile").update({"data": data}).eq("user_id", user_id).execute()
@@ -35,6 +42,7 @@ def save_profile(user_id: str, data: dict):
 def get_all_profiles() -> list:
     """Fetch all profiles to check for inactive users or scheduled events."""
     try:
+        if not supabase: return []
         result = supabase.table("profile").select("user_id", "data").execute()
         return result.data or []
     except Exception as e:
@@ -43,6 +51,7 @@ def get_all_profiles() -> list:
 
 def get_messages(user_id: str, limit: int = 10) -> list:
     try:
+        if not supabase: return []
         # Ordenar descendente para obtener los últimos, y luego revertir para mantener el orden cronológico
         result = supabase.table("messages").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(limit).execute()
         return list(reversed(result.data)) if result.data else []
@@ -52,6 +61,7 @@ def get_messages(user_id: str, limit: int = 10) -> list:
 
 def get_all_messages(user_id: str) -> list:
     try:
+        if not supabase: return []
         result = supabase.table("messages").select("*").eq("user_id", user_id).order("created_at").execute()
         return result.data or []
     except Exception as e:
@@ -60,6 +70,7 @@ def get_all_messages(user_id: str) -> list:
 
 def save_message(user_id: str, role: str, content: str):
     try:
+        if not supabase: return
         supabase.table("messages").insert({
             "user_id": user_id,
             "role": role,
@@ -70,6 +81,7 @@ def save_message(user_id: str, role: str, content: str):
 
 def save_episode(user_id: str, event: str, domain: str = None, impact: str = None, embedding: list = None):
     try:
+        if not supabase: return
         data = {
             "user_id": user_id,
             "event": event,
@@ -86,6 +98,7 @@ def save_episode(user_id: str, event: str, domain: str = None, impact: str = Non
 
 def get_episodes(user_id: str, limit: int = 10) -> list:
     try:
+        if not supabase: return []
         result = supabase.table("episodes").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(limit).execute()
         return result.data or []
     except Exception as e:
@@ -94,6 +107,7 @@ def get_episodes(user_id: str, limit: int = 10) -> list:
 
 def search_similar_episodes(user_id: str, query_embedding: list, limit: int = 3) -> list:
     try:
+        if not supabase: return []
         response = supabase.rpc(
             "match_episodes",
             {
@@ -111,6 +125,7 @@ def search_similar_episodes(user_id: str, query_embedding: list, limit: int = 3)
 
 def get_person(user_id: str, name: str) -> dict:
     try:
+        if not supabase: return {}
         result = supabase.table("people").select("*").eq("user_id", user_id).ilike("name", f"%{name}%").execute()
         if result.data:
             return result.data[0]
@@ -121,6 +136,7 @@ def get_person(user_id: str, name: str) -> dict:
 
 def get_all_people(user_id: str) -> list:
     try:
+        if not supabase: return []
         result = supabase.table("people").select("*").eq("user_id", user_id).execute()
         return result.data or []
     except Exception as e:
@@ -129,6 +145,7 @@ def get_all_people(user_id: str) -> list:
 
 def get_null_episodes(user_id: str) -> list:
     try:
+        if not supabase: return []
         result = supabase.table("episodes").select("*").eq("user_id", user_id).is_("embedding", "null").execute()
         return result.data or []
     except Exception as e:
@@ -137,6 +154,7 @@ def get_null_episodes(user_id: str) -> list:
 
 def update_episode_embedding(episode_id: str, embedding: list):
     try:
+        if not supabase: return
         emb_str = f"[{','.join(str(x) for x in embedding)}]"
         supabase.table("episodes").update({"embedding": emb_str}).eq("id", episode_id).execute()
     except Exception as e:
@@ -144,6 +162,7 @@ def update_episode_embedding(episode_id: str, embedding: list):
 
 def save_person(user_id: str, name: str, relationship: str = None, notes: dict = {}):
     try:
+        if not supabase: return
         existing = supabase.table("people").select("*").eq("user_id", user_id).ilike("name", name).execute()
         if existing.data:
             current_notes = existing.data[0].get("notes", {})

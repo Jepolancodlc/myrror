@@ -1,11 +1,15 @@
 import logging
 import json
 import os
+import copy
+import asyncio
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 from database import save_profile, save_episode, save_person, get_all_people
 from datetime import datetime
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict
 
 load_dotenv()
 
@@ -13,25 +17,108 @@ logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PYDANTIC SCHEMAS (STRUCTURED OUTPUTS)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class PersonNotesSchema(BaseModel):
+    description: Optional[str] = Field(default=None, description="brief description")
+    context: Optional[str] = Field(default=None, description="how they came up in conversation")
+
+class PersonSchema(BaseModel):
+    name: str
+    relationship: Optional[str] = Field(default=None)
+    notes: Optional[PersonNotesSchema] = Field(default=None)
+
+class ClinicalProfileSchema(BaseModel):
+    big_five: Optional[Dict[str, int]] = Field(default=None, description="Dict with O, C, E, A, N integer scores 1-10")
+    enneagram: Optional[str] = Field(default=None)
+    mbti: Optional[str] = Field(default=None, description="MBTI personality type (e.g., INTJ, ENFP)")
+    archetype: Optional[str] = Field(default=None)
+
+class EventItemSchema(BaseModel):
+    event: str
+    timeframe: str
+
+class ProfileSchema(BaseModel):
+    name: Optional[str] = Field(default=None)
+    age: Optional[int] = Field(default=None)
+    location: Optional[str] = Field(default=None)
+    job: Optional[str] = Field(default=None)
+    life_compass: Optional[str] = Field(default=None)
+    current_mood_score: Optional[int] = Field(default=None)
+    myrror_strategy: Optional[str] = Field(default=None, description="your master plan for guiding this user")
+    upcoming_events: Optional[List[EventItemSchema]] = Field(default=None)
+    unresolved_threads: Optional[List[str]] = Field(default=None, description="pending topics to follow up on")
+    goals: Optional[List[str]] = Field(default=None)
+    fears: Optional[List[str]] = Field(default=None)
+    strengths: Optional[List[str]] = Field(default=None)
+    weaknesses: Optional[List[str]] = Field(default=None)
+    personality_traits: Optional[List[str]] = Field(default=None)
+    emotional_state: Optional[str] = Field(default=None)
+    emotional_patterns: Optional[List[str]] = Field(default=None)
+    communication_style: Optional[str] = Field(default=None)
+    relationship_patterns: Optional[List[str]] = Field(default=None)
+    core_values: Optional[List[str]] = Field(default=None)
+    humor_style: Optional[str] = Field(default=None)
+    decision_making: Optional[str] = Field(default=None)
+    self_perception: Optional[str] = Field(default=None)
+    life_situations: Optional[List[str]] = Field(default=None)
+    skills: Optional[List[str]] = Field(default=None)
+    learning: Optional[List[str]] = Field(default=None)
+    tech_level: Optional[str] = Field(default=None)
+    cultural_background: Optional[str] = Field(default=None)
+    preferred_tone: Optional[str] = Field(default=None)
+    failed_advice: Optional[List[str]] = Field(default=None)
+    detected_patterns: Optional[List[str]] = Field(default=None)
+    contradictions: Optional[List[str]] = Field(default=None)
+    personal_contracts: Optional[List[str]] = Field(default=None)
+    insights_from_files: Optional[List[str]] = Field(default=None)
+    growth_areas: Optional[List[str]] = Field(default=None)
+    core_beliefs: Optional[List[str]] = Field(default=None)
+    cognitive_biases: Optional[List[str]] = Field(default=None)
+    data_source: Optional[str] = Field(default="inferred", description="explicit|inferred")
+    unspoken_fears: Optional[List[str]] = Field(default=None)
+    unmet_needs: Optional[List[str]] = Field(default=None)
+    shadow_traits: Optional[List[str]] = Field(default=None)
+    interaction_manual: Optional[List[str]] = Field(default=None)
+    attachment_style: Optional[str] = Field(default=None)
+    clinical_profile: Optional[ClinicalProfileSchema] = Field(default=None)
+    behavioral_patterns: Optional[List[str]] = Field(default=None, description="Habits, frequent moods, and behavioral tendencies")
+    quirks_and_micro_details: Optional[List[str]] = Field(default=None, description="Typo patterns, ignored topics, recurring complaints, minor quirks")
+    cognition_style: Optional[str] = Field(default=None, description="How they process information: logical, emotional, impulsive, reflective, etc.")
+    psyche_and_motivations: Optional[str] = Field(default=None, description="Detailed analysis of their psyche and underlying motivations")
+    unrealized_truths: Optional[List[str]] = Field(default=None, description="objective facts they haven't realized")
+
+class EpisodeSchema(BaseModel):
+    event: str
+    domain: Optional[str] = Field(default=None, description="tech|work|personal|health|finance|relationships|learning|emotional")
+    impact: Optional[str] = Field(default=None, description="high|medium|low")
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # UTILS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def parse_json_response(text: str):
     try:
-        clean = text.strip().replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
+        clean = text.strip()
+        if "```json" in clean:
+            clean = clean.split("```json")[1].split("```")
+        elif "```" in clean:
+            clean = clean.split("```").split("```")[0]
+        return json.loads(clean.strip())
     except Exception as e:
         logger.error(f"JSON parse error: {e} | Text: {text[:200]}")
         return None
 
 def deep_merge(base: dict, updates: dict) -> dict:
-    result = base.copy()
+    result = copy.deepcopy(base)
     for key, value in updates.items():
-        if key in result:
+        if value is None:
+            continue
+        if key in result and result[key] is not None:
             if isinstance(result[key], list) and isinstance(value, list):
-                existing = [str(x) for x in result[key]]
                 for item in value:
-                    if str(item) not in existing:
+                    if item not in result[key]:
                         result[key].append(item)
             elif isinstance(result[key], dict) and isinstance(value, dict):
                 result[key] = deep_merge(result[key], value)
@@ -46,9 +133,12 @@ def track_evolution(profile: dict, new_data: dict) -> list:
         "emotional_state", "goals", "job", "location",
         "self_perception", "emotional_patterns", "relationship_patterns",
         "life_situations", "learning", "detected_patterns", "current_mood_score",
-        "myrror_strategy", "core_beliefs", "cognitive_biases"
+        "myrror_strategy", "core_beliefs", "cognitive_biases", "unspoken_fears", 
+        "unmet_needs", "interaction_manual", "attachment_style", "shadow_traits",
+        "clinical_profile", "unrealized_truths", "behavioral_patterns",
+        "quirks_and_micro_details", "cognition_style", "psyche_and_motivations"
     ]
-    evolution = profile.get("evolution", [])
+    evolution = profile.get("evolution", [])[-49:] # Mantener un límite de los últimos 50 registros para evitar explosión de tokens
     now = datetime.now().strftime("%Y-%m-%d")
 
     for field in tracked_fields:
@@ -116,6 +206,15 @@ def get_profile_for_context(profile: dict, context: str) -> str:
         "unresolved_threads": profile.get("unresolved_threads"),
         "myrror_strategy": profile.get("myrror_strategy"),
         "core_beliefs": profile.get("core_beliefs"),
+        "unspoken_fears": profile.get("unspoken_fears"),
+        "unmet_needs": profile.get("unmet_needs"),
+        "interaction_manual": profile.get("interaction_manual"),
+        "attachment_style": profile.get("attachment_style"),
+        "clinical_profile": profile.get("clinical_profile"),
+        "quirks_and_micro_details": profile.get("quirks_and_micro_details"),
+        "cognition_style": profile.get("cognition_style"),
+        "psyche_and_motivations": profile.get("psyche_and_motivations"),
+        "unrealized_truths": profile.get("unrealized_truths"),
         "life_compass": profile.get("life_compass"),
         "communication_style": profile.get("communication_style"),
         "humor_style": profile.get("humor_style"),
@@ -139,6 +238,7 @@ def get_profile_for_context(profile: dict, context: str) -> str:
         layer2.update({
             "relationship_patterns": profile.get("relationship_patterns"),
             "emotional_patterns": profile.get("emotional_patterns"),
+            "behavioral_patterns": profile.get("behavioral_patterns"),
             "insights_from_files": profile.get("insights_from_files"),
         })
 
@@ -165,6 +265,9 @@ def get_profile_for_context(profile: dict, context: str) -> str:
             "growth_areas": profile.get("growth_areas"),
             "contradictions": profile.get("contradictions"),
             "cognitive_biases": profile.get("cognitive_biases"),
+            "shadow_traits": profile.get("shadow_traits"),
+            "clinical_profile": profile.get("clinical_profile"),
+            "unrealized_truths": profile.get("unrealized_truths"),
         })
 
     combined = {**layer1, **layer2}
@@ -184,30 +287,16 @@ Analyze this conversation and identify any people mentioned by the user.
 User: "{content}"
 MYRROR: "{response}"
 
-For each person mentioned, extract:
-- Their name
-- Their relationship to the user (friend, girlfriend, boss, family, etc.)
-- Any relevant notes about them
-
 Only extract REAL people explicitly mentioned. Ignore generic references.
-Return ONLY pure JSON array. Empty [] if no people mentioned.
-
-[
-  {{
-    "name": "string",
-    "relationship": "string",
-    "notes": {{
-      "description": "brief description",
-      "context": "how they came up in conversation"
-    }}
-  }}
-]
 """
     try:
         result = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=list[PersonSchema]
+            )
         )
         people = parse_json_response(result.text)
         if not people or not isinstance(people, list):
@@ -215,11 +304,12 @@ Return ONLY pure JSON array. Empty [] if no people mentioned.
 
         for person in people:
             if person.get("name"):
-                save_person(
+                await asyncio.to_thread(
+                    save_person,
                     user_id=user_id,
                     name=person["name"],
-                    relationship=person.get("relationship"),
-                    notes=person.get("notes", {})
+                    relationship=person.get("relationship") or None,
+                    notes=person.get("notes") or {}
                 )
         if people:
             logger.info(f"Saved {len(people)} people for {user_id}")
@@ -241,47 +331,46 @@ INTERACTION:
 User: "{content}"
 MYRROR: "{response}"
 
-Extract EVERYTHING about the USER. Think like a Master Psychotherapist, Behavioral Analyst, and Strategic Life Guide. Be highly self-critical: if the user rejected advice, got annoyed, or didn't engage, extract what MYRROR should do differently in 'failed_advice' or 'learning'.
-Identify deep-rooted 'core_beliefs' (e.g., "I must be perfect to be loved") and 'cognitive_biases' (e.g., "Catastrophizing", "All-or-nothing thinking").
-Pay special attention to upcoming events they mention (meetings, exams, trips).
+ANALYSIS INSTRUCTIONS (WHAT TO OBSERVE):
+1. Explicit Analysis: Extract direct data like tastes, anecdotes, preferences, routines, and opinions.
+2. Implicit & Behavioral Analysis: Do not just take what the user says at face value. Analyze HOW they say it. Observe their level of formality, sarcasm/humor, energy level, response length, and use of slang.
+3. Micro-details ("Quirks"): Pay attention to minor peculiarities: recurring habits, common complaints, topics they avoid, or even typo patterns when frustrated.
+4. Psychology & Personality: Apply personality frameworks (Big Five, MBTI, Enneagram, Jungian) to deduce dominant traits. Evaluate extroversion, neuroticism, openness, agreeableness, and conscientiousness based purely on their text.
 
-Look for: explicit facts, personality traits, emotional state, emotional patterns,
-communication style, relationship patterns, core values, hidden fears, dreams,
-self-perception, life situations, skills, cultural background, humor style,
-decision-making style, failed advice, personal contracts, contradictions,
-insights from shared files, growth areas, core_beliefs, cognitive_biases.
+YOUR TASK:
+Extract EVERYTHING about the USER. Update their "Profile Dossier" comprehensively:
+- Personality Summary: Detailed analysis of their psyche, archetype, and underlying motivations.
+- Communication & Cognition Style: How they process information (logical, emotional, impulsive, reflective).
+- Behavioral Patterns: Habits, frequent moods, and quirks.
+- Evolution Log: What has changed in the user since the first interactions (handled automatically, but focus on capturing new states).
+
+Also look for: upcoming events, explicit facts, attachment_style, hidden fears,
+self-perception, skills, failed advice, personal contracts, contradictions,
+core_beliefs, cognitive_biases, unspoken_fears, unmet_needs, shadow_traits, and unrealized_truths.
 
 RULES:
 - Extract ONLY about the USER.
+- Update the 'interaction_manual': a living set of rules on EXACTLY how MYRROR must speak to this specific user to bypass their psychological defenses based on what works and what fails.
 - Never invent.
 - Keep ALL existing fields.
 - For lists, add without removing.
-- Return ONLY pure JSON. No markdown.
-
-{{
-  "name": "string", "age": number, "location": "string", "job": "string",
-  "life_compass": "string", "current_mood_score": 5, "myrror_strategy": "string (your master plan for guiding this user)",
-  "upcoming_events": [{{"event": "string", "timeframe": "string"}}], "unresolved_threads": ["string (pending topics to follow up on)"],
-  "goals": [], "fears": [], "strengths": [], "weaknesses": [],
-  "personality_traits": [], "emotional_state": "string", "emotional_patterns": [],
-  "communication_style": "string", "relationship_patterns": [], "core_values": [],
-  "humor_style": "string", "decision_making": "string", "self_perception": "string",
-  "life_situations": [], "skills": [], "learning": [], "tech_level": "string",
-  "cultural_background": "string", "preferred_tone": "string", "failed_advice": [],
-  "detected_patterns": [], "contradictions": [], "personal_contracts": [],
-  "insights_from_files": [], "growth_areas": [], "core_beliefs": [], "cognitive_biases": [], "data_source": "explicit|inferred"
-}}
 """
 
     try:
         result = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=ProfileSchema
+            )
         )
         new_data = parse_json_response(result.text)
         if not new_data:
             return profile
+
+        # Limpiar datos nulos de la respuesta del Schema para no borrar info existente
+        new_data = {k: v for k, v in new_data.items() if v is not None}
 
         evolution = track_evolution(profile, new_data)
         source = new_data.pop("data_source", "inferred")
@@ -293,7 +382,7 @@ RULES:
         updated["last_conversation"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         updated["total_conversations"] = updated.get("total_conversations", 0) + 1
 
-        save_profile(user_id, updated)
+        await asyncio.to_thread(save_profile, user_id, updated)
         logger.info(f"Profile updated for {user_id} | Context: {context_type}")
         return updated
 
@@ -314,15 +403,15 @@ User: "{content}"
 MYRROR: "{response}"
 
 Only extract REAL, SIGNIFICANT events. Ignore small talk and tests.
-Return ONLY a JSON array. Empty [] if nothing significant.
-
-[{{"event": "string", "domain": "tech|work|personal|health|finance|relationships|learning|emotional", "impact": "high|medium|low"}}]
 """
     try:
         result = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=list[EpisodeSchema]
+            )
         )
         episodes = parse_json_response(result.text)
         if not episodes or not isinstance(episodes, list):
@@ -341,7 +430,8 @@ Return ONLY a JSON array. Empty [] if nothing significant.
                 except Exception as e:
                     logger.error(f"Embedding error: {e}")
 
-                save_episode(
+                await asyncio.to_thread(
+                    save_episode,
                     user_id=user_id,
                     event=episode["event"],
                     domain=episode.get("domain"),
@@ -382,16 +472,18 @@ THIS WEEK'S CONVERSATIONS:
 THIS WEEK'S EPISODES:
 {episodes_text}
 
-Write a weekly summary covering:
-1. What they talked about most
-2. Commitments made vs kept
-3. Emotional patterns this week
-4. What they avoided or postponed
-5. One focus for next week
-
-Be specific, honest, direct. Reference real things.
-3-5 sentences max per point.
-Respond in the user's language.
+INSTRUCTIONS:
+1. Write a weekly summary covering:
+   - What they talked about most
+   - Commitments made vs kept
+   - Emotional patterns this week
+   - What they avoided or postponed
+   - One focus for next week
+2. ADAPT TO THEIR MIND: Structure this summary matching their 'cognition_style'. If they are logical, make it systematic and factual. If emotional, focus on internal shifts and resonance.
+3. PSYCHOLOGICAL DEPTH: Explicitly point out how their 'behavioral_patterns', 'quirks_and_micro_details', or 'clinical_profile' drove this week's outcomes.
+4. Be specific, honest, direct. Reference real things.
+5. 3-5 sentences max per point.
+6. Respond in the user's language.
 """
     try:
         result = await client.aio.models.generate_content(
@@ -399,6 +491,10 @@ Respond in the user's language.
             contents=prompt
         )
         summary = result.text.strip()
+        if not summary:
+            return ""
+        if not summary:
+            return
         
         embedding = None
         try:
@@ -411,7 +507,8 @@ Respond in the user's language.
         except Exception as e:
             logger.error(f"Weekly summary embedding error: {e}")
 
-        save_episode(
+        await asyncio.to_thread(
+            save_episode,
             user_id=user_id,
             event=f"Weekly summary: {summary[:200]}",
             domain="personal",
@@ -441,7 +538,8 @@ PROFILE: {json.dumps(profile, ensure_ascii=False, separators=(',', ':'))}
 CONVERSATION: {conversation}
 
 3 sentences max. Third person. Specific.
-Include a brief self-critique: What approach worked or failed for MYRROR today? What should MYRROR change next time?
+Focus on how their 'cognition_style' and 'behavioral_patterns' manifested today.
+Include a brief self-critique: What approach worked or failed for MYRROR today based on their psyche? What should MYRROR change next time?
 """
     try:
         result = await client.aio.models.generate_content(
@@ -461,7 +559,8 @@ Include a brief self-critique: What approach worked or failed for MYRROR today? 
         except Exception as e:
             logger.error(f"Daily summary embedding error: {e}")
             
-        save_episode(
+        await asyncio.to_thread(
+            save_episode,
             user_id=user_id,
             event=f"Daily summary: {summary}",
             domain="personal",
@@ -508,3 +607,23 @@ Return only the summary. No labels.
     except Exception as e:
         logger.error(f"History compression error for {user_id}: {e}", exc_info=True)
         return ""
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# POST ANALYSIS ORCHESTRATOR
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def run_post_analysis_tasks(user_id: str, context_type: str, content: str, response: str, profile: dict, in_crisis: bool = False):
+    try:
+        if in_crisis:
+            profile["last_crisis"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        else:
+            profile.pop("crisis_checked", None)
+            
+        await extract_and_save_profile(user_id, context_type, content, response, profile)
+        
+        await asyncio.gather(
+            extract_episodes_from_content(user_id, content, response),
+            extract_people(user_id, content, response)
+        )
+    except Exception as e:
+        logger.error(f"Post-analysis tasks error for {user_id}: {e}", exc_info=True)

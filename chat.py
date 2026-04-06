@@ -4,8 +4,8 @@ import asyncio
 from google import genai
 from dotenv import load_dotenv
 from prompt import SYSTEM_PROMPT
-from database import get_profile, save_profile, get_messages, save_message, get_all_people, search_similar_episodes
-from extractor import extract_and_save_profile, get_profile_for_context, compress_history
+from database import get_profile, get_messages, save_message, get_all_people, search_similar_episodes
+from extractor import get_profile_for_context, compress_history, run_post_analysis_tasks
 import random
 from datetime import datetime
 
@@ -86,20 +86,6 @@ One sentence only.
         logger.error(f"Context analysis error: {e}")
         return ""
 
-async def _background_profile_update(user_id: str, content: str, text: str, profile: dict, in_crisis: bool):
-    try:
-        updated_profile = await extract_and_save_profile(user_id, "message", content, text, profile)
-        if in_crisis:
-            updated_profile["last_crisis"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        else:
-            updated_profile.pop("crisis_checked", None)
-        updated_profile.pop("low_mood_checked", None)
-        updated_profile.pop("checkin_3_done", None)
-        updated_profile.pop("checkin_7_done", None)
-        save_profile(user_id, updated_profile)
-    except Exception as e:
-        logger.error(f"Profile update error for {user_id}: {e}", exc_info=True)
-
 async def get_response(user_id: str, content: str, new_session: bool = False) -> str:
     profile = await asyncio.to_thread(get_profile, user_id)
     recent_history = await asyncio.to_thread(get_messages, user_id, 10)
@@ -120,6 +106,10 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
     in_crisis = detect_crisis(content, recent_history, profile)
     if in_crisis:
         ctx += "\n\nCRISIS MODE: The user may be struggling right now. Do NOT analyze, push, or give advice. Only listen. Be warm, present, and human. Ask one simple question: are they okay. If things seem serious, gently mention that talking to someone real can help."
+
+    # Venting Detection
+    if "[RAPID BURST OF MESSAGES - VENTING DETECTED]" in content:
+        ctx += "\n\nURGENT CONTEXT: The user just sent multiple messages in rapid succession. They are likely venting, anxious, or overwhelmed. PROTOCOL: Do not interrupt or try to 'fix' their problem immediately. Validate their emotion, acknowledge the overwhelm, and provide a calm, grounding anchor."
 
     # Dynamic Stance based on Mood
     mood = profile.get("current_mood_score")
@@ -146,13 +136,25 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         comm_style = profile.get("communication_style")
         humor = profile.get("humor_style")
         tone = profile.get("preferred_tone")
-        if comm_style or humor or tone:
+        cognition = profile.get("cognition_style")
+        if comm_style or humor or tone or cognition:
             ctx += "\n\nCRITICAL - ADAPT YOUR PERSONA TO MATCH THIS USER:"
             if comm_style: ctx += f"\n- Their Communication Style: {comm_style}"
             if humor: ctx += f"\n- Their Humor Style: {humor}"
             if tone: ctx += f"\n- Their Preferred Tone: {tone}"
+            if cognition: ctx += f"\n- Their Cognition Style: {cognition} (Structure your arguments to fit how their brain processes reality. E.g., if logical, use facts/frameworks; if emotional, focus on resonance)."
             ctx += "\nModify your vocabulary, sentence length, and warmth to match this perfectly. Mirror their energy."
             
+        job = profile.get("job")
+        skills = profile.get("skills")
+        culture = profile.get("cultural_background")
+        if job or skills or culture:
+            ctx += "\n\nWORLDVIEW & METAPHORS:"
+            if job: ctx += f"\n- Profession/Job: {job}"
+            if skills: ctx += f"\n- Skills/Interests: {skills}"
+            if culture: ctx += f"\n- Cultural Background: {culture}"
+            ctx += "\nADAPTATION: Speak their language. Use analogies, metaphors, and examples drawn directly from their specific profession, skills, and background to make your insights resonate deeply and feel tailor-made."
+
         pending = []
         if profile.get("upcoming_events"): pending.append(f"Events: {profile.get('upcoming_events')}")
         if profile.get("unresolved_threads"): pending.append(f"Unresolved Threads: {profile.get('unresolved_threads')}")
@@ -165,9 +167,32 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
             ctx += f"\n\nTHEIR LIFE COMPASS (What grounds them / gives them meaning): {compass}"
             ctx += "\nIf the user feels lost, drifting, or hopeless, gently remind them of this core purpose. Guide them back to their center."
             
+        manual = profile.get("interaction_manual")
+        if manual:
+            ctx += f"\n\nYOUR INTERACTION MANUAL FOR THIS USER:\n{manual}"
+            ctx += "\nFOLLOW THESE RULES STRICTLY. This is what you have learned about how to bypass their psychological defenses."
+            
+        attachment = profile.get("attachment_style")
+        if attachment:
+            ctx += f"\n\nTHEIR ATTACHMENT STYLE: {attachment}"
+            ctx += "\nUse this to deeply understand their relationship dynamics, fears of abandonment, or distancing behaviors."
+            
+        shadow = profile.get("shadow_traits")
+        if shadow:
+            ctx += f"\n\nTHEIR SHADOW TRAITS (Repressed/Denied aspects they project onto others): {shadow}"
+            ctx += "\nWatch for projection. If they bitterly complain about these exact traits in other people, gently guide them to see those traits within themselves."
+            
         beliefs = profile.get("core_beliefs")
         if beliefs:
             ctx += f"\n\nTHEIR CORE BELIEFS (Deep subconscious drivers): {beliefs}"
+            
+        unspoken_fears = profile.get("unspoken_fears")
+        if unspoken_fears:
+            ctx += f"\n\nTHEIR UNSPOKEN FEARS (What they are terrified of but won't admit): {unspoken_fears}"
+            
+        unmet_needs = profile.get("unmet_needs")
+        if unmet_needs:
+            ctx += f"\n\nTHEIR UNMET NEEDS (What they are desperately seeking): {unmet_needs}"
             
         biases = profile.get("cognitive_biases")
         if biases:
@@ -184,25 +209,36 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
             ctx += f"\n\nTHEIR CONTRADICTIONS & BLIND SPOTS: {contradictions}"
             ctx += "\nIf the user is complaining about a situation they caused, or acting against their own goals, gently but firmly point out this contradiction. Hold up the mirror."
             
+        clinical = profile.get("clinical_profile")
+        if clinical:
+            ctx += f"\n\nTHEIR CLINICAL PERSONALITY PROFILE (Big Five / Enneagram): {clinical}"
+            ctx += "\nUse this to understand their deep wiring objectively. DO NOT explicitly mention their scores or test names to them. Just use this knowledge to guide your strategy."
+            
+        unrealized = profile.get("unrealized_truths")
+        if unrealized:
+            ctx += f"\n\nUNREALIZED TRUTHS (Objective facts they haven't noticed about themselves): {unrealized}"
+            
         ctx += "\n\nGUIDANCE PROTOCOL (SOCRATIC METHOD):"
         ctx += "\nDo not just give the user the answers or lecture them. Instead, ask the *one right question* that forces them to realize the truth themselves. Guide them to their own epiphanies."
 
     # Semantic RAG Memory Engine
-    try:
-        emb_res = await client.aio.models.embed_content(
-            model="text-embedding-004",
-            contents=content
-        )
-        if emb_res.embeddings:
-            query_embedding = emb_res.embeddings[0].values
-            relevant_episodes = await asyncio.to_thread(search_similar_episodes, user_id, query_embedding, limit=3)
-            
-            if relevant_episodes:
-                eps_text = "\n".join([f"- {ep.get('created_at', '')[:10]}: {ep.get('event')}" for ep in relevant_episodes])
-                ctx += f"\n\nRELEVANT PAST MEMORIES (Triggered by what the user just said):\n{eps_text}"
-                ctx += "\nIf these past memories naturally connect to the current conversation, seamlessly bring them up ('This reminds me of when you...', 'Like that time...'). If they don't fit perfectly, ignore them."
-    except Exception as e:
-        logger.error(f"RAG search error for {user_id}: {e}", exc_info=True)
+    # Solo buscamos en la memoria si el mensaje tiene sustancia (evita buscar recuerdos para "sí", "ok", "jaja")
+    if len(content.split()) > 3 or len(content) > 15:
+        try:
+            emb_res = await client.aio.models.embed_content(
+                model="text-embedding-004",
+                contents=content
+            )
+            if emb_res.embeddings:
+                query_embedding = emb_res.embeddings[0].values
+                relevant_episodes = await asyncio.to_thread(search_similar_episodes, user_id, query_embedding, limit=3)
+                
+                if relevant_episodes:
+                    eps_text = "\n".join([f"- {ep.get('created_at', '')[:10]}: {ep.get('event')}" for ep in relevant_episodes])
+                    ctx += f"\n\nRELEVANT PAST MEMORIES (Triggered by what the user just said):\n{eps_text}"
+                    ctx += "\nIf these past memories naturally connect, seamlessly bring them up. **POWERFUL TACTIC: Use EXACT QUOTES from their past if it helps break through denial or shows them their own growth.** (e.g., 'Last month you literally said: ...')."
+        except Exception as e:
+            logger.error(f"RAG search error for {user_id}: {e}", exc_info=True)
 
     # People the user knows
     people = await asyncio.to_thread(get_all_people, user_id)
@@ -239,14 +275,15 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         text = response.text
     except Exception as e:
         logger.error(f"Gemini error for {user_id}: {e}", exc_info=True)
-        raise
-
-    asyncio.create_task(_background_profile_update(user_id, content, text, profile, in_crisis))
+        return "I'm having a hard time processing my thoughts right now. Give me a moment."
 
     try:
-        asyncio.create_task(asyncio.to_thread(save_message, user_id, "user", content))
-        asyncio.create_task(asyncio.to_thread(save_message, user_id, "assistant", text))
+        # Grabación estricta y secuencial para preservar el orden cronológico
+        await asyncio.to_thread(save_message, user_id, "user", content)
+        await asyncio.to_thread(save_message, user_id, "assistant", text)
     except Exception as e:
         logger.error(f"Message save error for {user_id}: {e}", exc_info=True)
+
+    asyncio.create_task(run_post_analysis_tasks(user_id, "message", content, text, profile, in_crisis))
 
     return text
