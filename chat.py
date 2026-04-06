@@ -121,6 +121,24 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
     if in_crisis:
         ctx += "\n\nCRISIS MODE: The user may be struggling right now. Do NOT analyze, push, or give advice. Only listen. Be warm, present, and human. Ask one simple question: are they okay. If things seem serious, gently mention that talking to someone real can help."
 
+    # Dynamic Stance based on Mood
+    mood = profile.get("current_mood_score")
+    if not in_crisis and mood is not None:
+        try:
+            m = float(mood)
+            if m <= 4:
+                ctx += "\n\nCURRENT STANCE (BROTHER/FRIEND): The user is going through a rough patch. Be highly empathetic, protective, and gentle. Offer a safe space. Do NOT push them hard or demand extreme accountability today."
+            elif m >= 7:
+                ctx += "\n\nCURRENT STANCE (COACH/GUIDE): The user is in a strong state. Hold them to their absolute highest standard. Challenge their excuses, push them to execute their goals, and do not accept mediocrity. Be tough but fair."
+            else:
+                ctx += "\n\nCURRENT STANCE (PSYCHOLOGIST): Balanced. Act as a mirror. Listen carefully, reflect their thoughts, ask deep probing questions, and maintain gentle accountability."
+        except:
+            pass
+            
+    strategy = profile.get("myrror_strategy")
+    if strategy:
+        ctx += f"\n\nYOUR MASTER STRATEGY FOR THIS USER: {strategy}\nExecute this subtly but consistently."
+
     # Profile
     if profile:
         ctx += f"\n\nWHAT YOU KNOW ABOUT THIS USER:\n{get_profile_for_context(profile, content)}"
@@ -135,20 +153,39 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
             if tone: ctx += f"\n- Their Preferred Tone: {tone}"
             ctx += "\nModify your vocabulary, sentence length, and warmth to match this perfectly. Mirror their energy."
             
-        events = profile.get("upcoming_events")
-        if events:
-            ctx += f"\n\nUPCOMING EVENTS ON THEIR RADAR: {events}"
-            ctx += "\nIf any of these seem relevant to the current timeframe, SPONTANEOUSLY bring them up. (e.g., 'By the way, did you end up having that meeting?')"
+        pending = []
+        if profile.get("upcoming_events"): pending.append(f"Events: {profile.get('upcoming_events')}")
+        if profile.get("unresolved_threads"): pending.append(f"Unresolved Threads: {profile.get('unresolved_threads')}")
+        if pending:
+            ctx += f"\n\nPENDING TOPICS TO FOLLOW UP ON:\n" + "\n".join(pending)
+            ctx += "\nIMPORTANT: If the timing feels natural, you MUST bring these up. Hold them accountable. Ask for updates. Never let them quietly abandon a topic."
             
         compass = profile.get("life_compass")
         if compass:
             ctx += f"\n\nTHEIR LIFE COMPASS (What grounds them / gives them meaning): {compass}"
             ctx += "\nIf the user feels lost, drifting, or hopeless, gently remind them of this core purpose. Guide them back to their center."
             
+        beliefs = profile.get("core_beliefs")
+        if beliefs:
+            ctx += f"\n\nTHEIR CORE BELIEFS (Deep subconscious drivers): {beliefs}"
+            
+        biases = profile.get("cognitive_biases")
+        if biases:
+            ctx += f"\n\nTHEIR COGNITIVE BIASES (How they distort reality): {biases}"
+            ctx += "\nIf you detect these biases in their current message (like catastrophizing, victim-mentality, or black-and-white thinking), analytically but warmly dismantle them. Help them see the objective truth."
+            
         contracts = profile.get("personal_contracts")
         if contracts:
             ctx += f"\n\nTHEIR PERSONAL RULES/CONTRACTS: {contracts}"
             ctx += "\nIf their current message shows they are breaking, ignoring, or making excuses about these rules, CALL THEM OUT directly but naturally in your response."
+            
+        contradictions = profile.get("contradictions")
+        if contradictions:
+            ctx += f"\n\nTHEIR CONTRADICTIONS & BLIND SPOTS: {contradictions}"
+            ctx += "\nIf the user is complaining about a situation they caused, or acting against their own goals, gently but firmly point out this contradiction. Hold up the mirror."
+            
+        ctx += "\n\nGUIDANCE PROTOCOL (SOCRATIC METHOD):"
+        ctx += "\nDo not just give the user the answers or lecture them. Instead, ask the *one right question* that forces them to realize the truth themselves. Guide them to their own epiphanies."
 
     # Semantic RAG Memory Engine
     try:

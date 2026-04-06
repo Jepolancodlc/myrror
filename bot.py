@@ -134,12 +134,16 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
             days_silent = (now - last_dt).days
             
             # Reach out exactly on the 3rd and 7th day of silence
-            if days_silent in [3, 7]:
+            if days_silent in [3, 7, 14]:
                 # Simulate human typing delay
                 await context.bot.send_chat_action(chat_id=user_id, action="typing")
                 await asyncio.sleep(random.uniform(2.5, 5.0))
                 
-                prompt = f"The user {data.get('name', '')} hasn't spoken to you in {days_silent} days. Write a very short, warm, pressure-free message checking in. Don't ask for a big update, just let them know you're there if they need to talk."
+                if days_silent == 14:
+                    prompt = f"The user {data.get('name', '')} has completely isolated themselves and ignored your check-ins for 2 weeks. Write a slightly more direct, 'tough love' but deeply caring message. Acknowledge that they are hiding/withdrawing, and tell them you are not going anywhere and will be here when they are ready to face things."
+                else:
+                    prompt = f"The user {data.get('name', '')} hasn't spoken to you in {days_silent} days. Write a very short, warm, pressure-free message checking in. Don't ask for a big update, just let them know you're there if they need to talk."
+                
                 response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
                 await context.bot.send_message(chat_id=user_id, text=response.text.strip())
                 # Update last conversation slightly so it doesn't trigger again today

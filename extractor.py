@@ -45,7 +45,8 @@ def track_evolution(profile: dict, new_data: dict) -> list:
     tracked_fields = [
         "emotional_state", "goals", "job", "location",
         "self_perception", "emotional_patterns", "relationship_patterns",
-        "life_situations", "learning", "detected_patterns", "current_mood_score"
+        "life_situations", "learning", "detected_patterns", "current_mood_score",
+        "myrror_strategy", "core_beliefs", "cognitive_biases"
     ]
     evolution = profile.get("evolution", [])
     now = datetime.now().strftime("%Y-%m-%d")
@@ -111,6 +112,10 @@ def get_profile_for_context(profile: dict, context: str) -> str:
         "total_conversations": profile.get("total_conversations"),
         "last_conversation": profile.get("last_conversation"),
         "current_mood_score": profile.get("current_mood_score"),
+        "upcoming_events": profile.get("upcoming_events"),
+        "unresolved_threads": profile.get("unresolved_threads"),
+        "myrror_strategy": profile.get("myrror_strategy"),
+        "core_beliefs": profile.get("core_beliefs"),
         "life_compass": profile.get("life_compass"),
         "communication_style": profile.get("communication_style"),
         "humor_style": profile.get("humor_style"),
@@ -155,11 +160,11 @@ def get_profile_for_context(profile: dict, context: str) -> str:
 
     if any(w in context_lower for w in growth_keywords):
         layer2.update({
-            "upcoming_events": profile.get("upcoming_events"),
             "strengths": profile.get("strengths"),
             "weaknesses": profile.get("weaknesses"),
             "growth_areas": profile.get("growth_areas"),
             "contradictions": profile.get("contradictions"),
+            "cognitive_biases": profile.get("cognitive_biases"),
         })
 
     combined = {**layer1, **layer2}
@@ -236,14 +241,15 @@ INTERACTION:
 User: "{content}"
 MYRROR: "{response}"
 
-Extract EVERYTHING about the USER. Think like a psychologist, life coach and detective. Be highly self-critical: if the user rejected advice, got annoyed, or didn't engage, extract what MYRROR should do differently in 'failed_advice' or 'learning'.
+Extract EVERYTHING about the USER. Think like a Master Psychotherapist, Behavioral Analyst, and Strategic Life Guide. Be highly self-critical: if the user rejected advice, got annoyed, or didn't engage, extract what MYRROR should do differently in 'failed_advice' or 'learning'.
+Identify deep-rooted 'core_beliefs' (e.g., "I must be perfect to be loved") and 'cognitive_biases' (e.g., "Catastrophizing", "All-or-nothing thinking").
 Pay special attention to upcoming events they mention (meetings, exams, trips).
 
 Look for: explicit facts, personality traits, emotional state, emotional patterns,
 communication style, relationship patterns, core values, hidden fears, dreams,
 self-perception, life situations, skills, cultural background, humor style,
-decision-making style, failed advice, personal contracts, contradictions, growth areas,
-insights from shared files.
+decision-making style, failed advice, personal contracts, contradictions,
+insights from shared files, growth areas, core_beliefs, cognitive_biases.
 
 RULES:
 - Extract ONLY about the USER.
@@ -254,7 +260,8 @@ RULES:
 
 {{
   "name": "string", "age": number, "location": "string", "job": "string",
-  "life_compass": "string", "current_mood_score": 5, "upcoming_events": [{{"event": "string", "timeframe": "string"}}],
+  "life_compass": "string", "current_mood_score": 5, "myrror_strategy": "string (your master plan for guiding this user)",
+  "upcoming_events": [{{"event": "string", "timeframe": "string"}}], "unresolved_threads": ["string (pending topics to follow up on)"],
   "goals": [], "fears": [], "strengths": [], "weaknesses": [],
   "personality_traits": [], "emotional_state": "string", "emotional_patterns": [],
   "communication_style": "string", "relationship_patterns": [], "core_values": [],
@@ -262,7 +269,7 @@ RULES:
   "life_situations": [], "skills": [], "learning": [], "tech_level": "string",
   "cultural_background": "string", "preferred_tone": "string", "failed_advice": [],
   "detected_patterns": [], "contradictions": [], "personal_contracts": [],
-  "insights_from_files": [], "growth_areas": [], "data_source": "explicit|inferred"
+  "insights_from_files": [], "growth_areas": [], "core_beliefs": [], "cognitive_biases": [], "data_source": "explicit|inferred"
 }}
 """
 
