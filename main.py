@@ -3,6 +3,7 @@ import asyncio
 import os
 from fastapi import FastAPI
 from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 from chat import get_response
@@ -30,7 +31,8 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if os.getenv("TELEGRAM_TOKEN"):
-        asyncio.create_task(start_telegram_bot())
+        # Awaiting ensures FastAPI waits for the bot to be fully connected before accepting web requests
+        await start_telegram_bot()
     keepalive_task = asyncio.create_task(keep_alive())
     yield
     if os.getenv("TELEGRAM_TOKEN"):
@@ -38,6 +40,15 @@ async def lifespan(app: FastAPI):
     keepalive_task.cancel()
 
 app = FastAPI(lifespan=lifespan)
+
+# Configuración CORS para permitir conexiones futuras desde un Dashboard o Web App
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class Message(BaseModel):
     user_id: str
