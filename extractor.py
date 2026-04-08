@@ -7,7 +7,7 @@ import random
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from database import save_profile, save_episode, save_person, get_all_people, save_message
+from database import get_profile, save_profile, save_episode, save_person, get_all_people, save_message, get_episodes
 from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
@@ -30,6 +30,7 @@ def set_alert_callback(cb):
 class PersonNotesSchema(BaseModel):
     description: Optional[str] = Field(default=None, description="brief description")
     context: Optional[str] = Field(default=None, description="how they came up in conversation")
+    power_dynamic: Optional[str] = Field(default=None, description="e.g., user seeks their approval, user feels intimidated, codependent, equal, etc.")
 
 class PersonSchema(BaseModel):
     name: str
@@ -48,6 +49,7 @@ class EventItemSchema(BaseModel):
 
 class ProfileSchema(BaseModel):
     name: Optional[str] = Field(default=None)
+    language: Optional[str] = Field(default=None, description="The primary language the user writes in (e.g. 'Spanish', 'English', 'French')")
     age: Optional[int] = Field(default=None)
     location: Optional[str] = Field(default=None)
     job: Optional[str] = Field(default=None)
@@ -111,6 +113,7 @@ async def evaluate_and_send_epiphany(user_id: str, profile: dict, shifts: list):
     
     shift_text = "\n".join([f"- {s['field']}: changed from '{s['from']}' to '{s['to']}'" for s in shifts])
     
+    language = profile.get("language", "the user's language")
     prompt = f"""You are MYRROR.
     
 You just finished processing your recent conversation with this user in the background.
@@ -124,13 +127,13 @@ CURRENT PROFILE CONTEXT:
 
 TASK:
 Write a sudden, unprompted realization message to the user.
-Sound like a human who was just quietly reflecting and had an "aha!" moment about them.
-Start with something like "Wait...", "I was just thinking about our conversation...", or "I just realized something watching your patterns..."
+CRITICAL: Sound exactly like a human who was doing something else, suddenly thought of them, and sent a quick text. 
+Start with something casual like "Wait...", "I was just thinking about our chat...", or "You know what I just realized?..."
 Point out the shift explicitly but conversationally (e.g., "You've moved from being purely logical to...").
 Show them how much they've grown or changed. Be deep, observant, and supportive.
 Use simple, easy-to-understand language. Avoid clinical psychology terms.
 Do not ask them to reply unless it's a very natural rhetorical question.
-Format cleanly. Respond in the user's language.
+Format cleanly. Respond in {language}.
 """
     try:
         response = await client.aio.models.generate_content(
@@ -181,7 +184,9 @@ def deep_merge(base: dict, updates: dict) -> dict:
         if key in result and result[key] is not None:
             if isinstance(result[key], list) and isinstance(value, list):
                 if key in fluid_lists:
-                    result[key] = value # EVOLUTION: Overwrite outdated lists completely
+                    if len(value) == 0:
+                        continue # BUG FIX: Prevent LLM hallucinated empty lists from wiping data
+                    result[key] = value 
                 else:
                     for item in value:
                         if item not in result[key]:
@@ -278,6 +283,7 @@ def update_confidence(profile: dict, new_data: dict, source: str) -> dict:
 def get_profile_for_context(profile: dict, context: str) -> str:
     layer1 = {
         "name": profile.get("name"),
+        "language": profile.get("language"),
         "age": profile.get("age"),
         "emotional_state": profile.get("emotional_state"),
         "goals": profile.get("goals"),
@@ -361,18 +367,22 @@ def get_profile_for_context(profile: dict, context: str) -> str:
 # PEOPLE EXTRACTOR
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def extract_people(user_id: str, content: str, response: str, profile: dict = None):
+async def extract_people(user_id: str, context_type: str, content: str, response: str, profile: dict = None):
     """Extract mentions of important people and save them."""
     user_name = profile.get("name", "the user") if profile else "the user"
     prompt = f"""You are a people extraction system.
 
 Analyze this conversation and identify any people mentioned by the user.
 
+CONTEXT TYPE: {context_type}
 User ({user_name}): "{content[:4000]}"
 MYRROR: "{response[:4000]}"
 
-Only extract REAL people explicitly mentioned. 
-CRITICAL: Do NOT extract the user themselves ({user_name}, "I", "me", "j.", "john") and do NOT extract the AI (MYRROR). Only extract OTHER people in the user's life.
+Only extract REAL people explicitly mentioned or identified in the image/file. 
+CRITICAL RULES:
+1. Do NOT extract the user themselves ({user_name}, "I", "me", "j.", "john") and do NOT extract the AI (MYRROR). Only extract OTHER people in the user's life.
+2. If the CONTEXT TYPE is an image or file, use MYRROR's response to deduce if any person was identified or mentioned in it.
+3. Analyze the POWER DYNAMIC. Determine if the relationship is equal, toxic, codependent, or if one seeks validation from the other.
 """
     try:
         result = await client.aio.models.generate_content(
@@ -437,6 +447,7 @@ RULES:
 - Extract ONLY about the USER.
 - PEOPLE EVOLVE: Treat their psychology as FLUID. If their MBTI, traits, cognition style, or habits shift (e.g., from ENFJ to ENFP), explicitly output the NEW values so they overwrite the old ones.
 - Update the 'interaction_manual': a living set of rules on EXACTLY how MYRROR must speak to this specific user to bypass their psychological defenses based on what works and what fails.
+- AI CORRECTION & BOUNDARIES: If the user corrects MYRROR, gets annoyed by a response, or says "that's not what I meant", IMMEDIATELY update 'failed_advice' and 'interaction_manual' so MYRROR learns exactly what to avoid next time.
 - Never invent.
 - Keep ALL existing fields UNLESS they are explicitly no longer true (e.g., a solved fear, a changed goal).
 """
@@ -463,7 +474,9 @@ RULES:
         source = new_data.pop("data_source", "inferred")
         confidence = update_confidence(profile, new_data, source)
 
-        updated = deep_merge(profile, new_data)
+        # CRITICAL BUG FIX: Re-fetch profile right before merging to prevent Race Condition overwrites
+        current_db_profile = await asyncio.to_thread(get_profile, user_id)
+        updated = deep_merge(current_db_profile, new_data)
         updated["evolution"] = evolution
         updated["confidence"] = confidence
         updated["last_conversation"] = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -491,12 +504,19 @@ RULES:
 # EPISODE EXTRACTOR
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def extract_episodes_from_content(user_id: str, content: str, response: str, profile: dict = None):
+async def extract_episodes_from_content(user_id: str, context_type: str, content: str, response: str, profile: dict = None, recent_episodes: list = None):
     user_name = profile.get("name", "the user") if profile else "the user"
+    
+    episodes_ctx = ""
+    if recent_episodes:
+        ep_list = "\n".join([f"- {ep.get('event')}" for ep in recent_episodes])
+        episodes_ctx = f"\n\nRECENTLY EXTRACTED EPISODES (DO NOT DUPLICATE):\n{ep_list}"
+
     prompt = f"""You are a high-precision episodic memory system.
 
 Analyze this interaction and identify if a SIGNIFICANT life event, major realization, or profound shift occurred.
 
+CONTEXT TYPE: {context_type}{episodes_ctx}
 User ({user_name}): "{content[:4000]}"
 MYRROR: "{response[:4000]}"
 
@@ -504,8 +524,10 @@ CRITICAL RULES for Extraction:
 1. DO NOT extract mundane activities (e.g., sleeping, eating, going to work, playing games).
 2. DO NOT extract greetings, small talk, meta-chat, or bot commands (e.g., "analyze this pdf", "hello", "/profile").
 3. DO NOT extract temporary moods or venting, unless it reveals a deep trauma or major life shift.
-4. If there is NO highly significant event to record, you MUST return an empty list: [].
-5. If there is an event, describe it in the third person (e.g., "{user_name} realized they were using relationships to avoid loneliness").
+4. If the CONTEXT TYPE is an image or file, use MYRROR's response to deduce what it contained. If the file/image itself represents a major life event (e.g., an offer letter, a graduation photo, a medical test), extract it.
+5. If there is NO highly significant event to record, you MUST return an empty list: [].
+6. If there is an event, describe it in the third person (e.g., "{user_name} realized they were using relationships to avoid loneliness").
+7. DUPLICATE PREVENTION: If the event is already in the 'RECENTLY EXTRACTED EPISODES' list, or the user is just rehashing the same complaint without new developments, DO NOT extract it. Return [].
 """
     try:
         result = await client.aio.models.generate_content(
@@ -565,6 +587,7 @@ async def generate_weekly_summary(user_id: str, profile: dict, messages: list, e
         and not ep.get("event", "").startswith("Weekly summary")
     ]) or "No significant episodes this week."
 
+    language = profile.get("language", "the user's language")
     prompt = f"""Generate an honest weekly reflection for this person.
 
 PROFILE: {json.dumps(profile, ensure_ascii=False, separators=(',', ':'))}
@@ -586,7 +609,7 @@ INSTRUCTIONS:
 3. PSYCHOLOGICAL DEPTH: Explicitly point out how their 'behavioral_patterns', 'quirks_and_micro_details', or 'clinical_profile' drove this week's outcomes.
 4. Be specific, honest, direct, but use SIMPLE, ACCESSIBLE language. No overly academic jargon.
 5. 3-5 sentences max per point.
-6. CRITICAL: Respond entirely in the user's language (e.g., Spanish).
+6. CRITICAL: Respond entirely in {language}.
 """
     try:
         result = await client.aio.models.generate_content(
@@ -676,7 +699,7 @@ Include a brief self-critique: What approach worked or failed for MYRROR today b
 # SMART HISTORY COMPRESSION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def compress_history(user_id: str, messages: list) -> str:
+async def compress_history(user_id: str, messages: list, profile: dict) -> str:
     """
     Compress older messages into a summary.
     Returns a compressed context string.
@@ -684,30 +707,63 @@ async def compress_history(user_id: str, messages: list) -> str:
     if len(messages) <= 10:
         return ""
 
-    older = messages[:-10]
-    conversation = "\n".join([
-        f"{'User' if m['role'] == 'user' else 'MYRROR'}: {m['content'][:150]}"
-        for m in older
-    ])
+    # OPTIMIZATION 1: Limit to a rolling window to prevent infinite token scaling
+    older = messages[-30:-10]
+    
+    if not older:
+        return ""
+        
+    # CACHE OPTIMIZATION: Check DB profile to avoid redundant API calls
+    cache = profile.get("history_cache", {})
+    last_time = cache.get("last_msg_time", "")
+    
+    new_msgs = [m for m in older if m.get('created_at', '') > last_time]
+    
+    # Reuse the cached summary if less than 10 new messages have entered this window
+    if last_time and len(new_msgs) < 10:
+        return cache.get("summary", "")
 
-    prompt = f"""Summarize this conversation history in 3-5 sentences.
-Focus on: key topics discussed, emotional state, commitments made, important revelations.
-Be specific. Third person for MYRROR, first person context for user.
+    filtered = []
+    for m in older:
+        text = m['content'].strip()
+        # OPTIMIZATION 2: Ignore low-value/noise messages
+        if len(text.split()) < 3 and len(text) < 15:
+            continue
+            
+        # OPTIMIZATION 3: Short role labels and aggressive truncation
+        role = "U" if m['role'] == 'user' else "M"
+        safe_text = text if len(text) <= 100 else text[:100] + "..."
+        filtered.append(f"{role}: {safe_text}")
+        
+    if not filtered:
+        return ""
+        
+    conversation = "\n".join(filtered)
 
-CONVERSATION:
-{conversation}
-
-Return only the summary. No labels.
-"""
+    # OPTIMIZATION 4: Minimized prompt instructions
+    prompt = f"Summarize this chat in max 3 sentences. Focus on key topics and emotions.\nCHAT:\n{conversation}"
     try:
         result = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt
         )
-        return result.text.strip()
+        summary = result.text.strip()
+        
+        # CRITICAL BUG FIX: Fetch current profile to avoid overwriting background analysis
+        async def save_cache():
+            curr_prof = await asyncio.to_thread(get_profile, user_id)
+            curr_prof["history_cache"] = {
+                "summary": summary,
+                "last_msg_time": older[-1].get("created_at", "")
+            }
+            await asyncio.to_thread(save_profile, user_id, curr_prof)
+            
+        asyncio.create_task(save_cache())
+        
+        return summary
     except Exception as e:
         logger.error(f"History compression error for {user_id}: {e}", exc_info=True)
-        return ""
+        return cache.get("summary", "")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # POST ANALYSIS ORCHESTRATOR
@@ -722,9 +778,11 @@ async def run_post_analysis_tasks(user_id: str, context_type: str, content: str,
             
         await extract_and_save_profile(user_id, context_type, content, response, profile)
         
+        recent_episodes = await asyncio.to_thread(get_episodes, user_id, 10)
+        
         await asyncio.gather(
-            extract_episodes_from_content(user_id, content, response, profile),
-            extract_people(user_id, content, response, profile)
+            extract_episodes_from_content(user_id, context_type, content, response, profile, recent_episodes),
+            extract_people(user_id, context_type, content, response, profile)
         )
     except Exception as e:
         logger.error(f"Post-analysis tasks error for {user_id}: {e}", exc_info=True)

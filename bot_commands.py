@@ -14,6 +14,8 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
+translation_cache = {}
+
 def get_mood_keyboard():
     return InlineKeyboardMarkup([
         [
@@ -37,19 +39,31 @@ async def localize(user_id: str, text: str, profile: dict = None) -> str:
         profile = await asyncio.to_thread(get_profile, user_id)
     if not profile:
         return text
-    prompt = f"""Translate the following text into the primary language the user speaks.
-Look at their profile to determine their language (e.g., if they speak Spanish, translate to Spanish).
-If you cannot determine their language, leave it in English.
-CRITICAL: Maintain the exact same formatting, Markdown, and emojis. Do NOT add any conversational text.
 
-USER PROFILE:
-{json.dumps(profile, ensure_ascii=False)}
+    language = profile.get("language")
+    if not language:
+        return text
+        
+    lang_key = language.lower().strip()
+    if lang_key in ["english", "en", "en-us", "en-gb"]:
+        return text
+
+    if lang_key not in translation_cache:
+        translation_cache[lang_key] = {}
+        
+    if text in translation_cache[lang_key]:
+        return translation_cache[lang_key][text]
+
+    prompt = f"""Translate the following text to {language}.
+CRITICAL: Maintain the exact same formatting, Markdown, and emojis. Do NOT add any conversational text. Return ONLY the translated text.
 
 TEXT TO TRANSLATE:
 {text}"""
     try:
         response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
-        return response.text.strip()
+        translated = response.text.strip()
+        translation_cache[lang_key][text] = translated
+        return translated
     except Exception as e:
         logger.error(f"Localization error: {e}")
         return text
@@ -84,10 +98,10 @@ async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fig.tight_layout()
 
         buf = io.BytesIO()
-        plt.savefig(buf, format='png')
+        fig.savefig(buf, format='png')
         buf.seek(0)
+        import matplotlib.pyplot as plt
         plt.close(fig)
-        plt.close('all') # Limpieza profunda del backend Agg
 
         msg_cap = await localize(user_id, "Here is how your mood has been trending.", profile)
         await update.message.reply_photo(photo=buf, caption=msg_cap)
@@ -201,13 +215,13 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ax.set_xticks(angles[:-1])
             ax.set_xticklabels(labels, fontsize=10)
             ax.set_ylim(0, 10)
-            plt.title("Your Psychological Signature", size=14, color='#333', y=1.1)
+            ax.set_title("Your Psychological Signature", size=14, color='#333', y=1.1)
             
             buf = io.BytesIO()
-            plt.savefig(buf, format='png', bbox_inches='tight')
+            fig.savefig(buf, format='png', bbox_inches='tight')
             buf.seek(0)
+            import matplotlib.pyplot as plt
             plt.close(fig)
-            plt.close('all')
             
             msg_cap = await localize(user_id, "This is the shape of your personality based on our interactions.", profile)
             await update.message.reply_photo(photo=buf, caption=msg_cap)
@@ -340,8 +354,25 @@ async def reflect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = await localize(user_id, "🪞 *Reflecting on your journey...*", profile)
     status_msg = await update.message.reply_text(msg, parse_mode="Markdown")
-    episodes_text = "\n".join([f"- [{ep.get('domain')}] {ep.get('event')} ({ep.get('created_at', '')[:10]})" for ep in reversed(episodes) if not ep.get("event", "").startswith("Daily summary") and not ep.get("event", "").startswith("Weekly summary")]) or "No significant episodes recorded yet."
     
+    valid_episodes = [ep for ep in reversed(episodes) if not ep.get("event", "").startswith("Daily summary") and not ep.get("event", "").startswith("Weekly summary")]
+    if valid_episodes:
+        eps_list = []
+        now_date = datetime.now().date()
+        for ep in valid_episodes:
+            ep_date_str = ep.get('created_at', '')[:10]
+            try:
+                ep_date = datetime.strptime(ep_date_str, "%Y-%m-%d").date()
+                days_ago = (now_date - ep_date).days
+                time_ctx = "today" if days_ago == 0 else ("yesterday" if days_ago == 1 else f"{days_ago} days ago")
+            except:
+                time_ctx = ep_date_str
+            eps_list.append(f"- [{ep.get('domain')}] {ep.get('event')} ({time_ctx})")
+        episodes_text = "\n".join(eps_list)
+    else:
+        episodes_text = "No significant episodes recorded yet."
+
+    language = profile.get("language", "the user's primary language")
     prompt = f"""You are MYRROR. Generate a profound, psychological reflection for this person.
 
 PROFILE DATA:
@@ -356,7 +387,7 @@ INSTRUCTIONS:
 3. Reflect on their 'psyche_and_motivations' and 'clinical_profile' (MBTI, Enneagram, Big Five) to explain *why* they are exactly where they are right now.
 4. Point out any contradictions between what they say they want and what their behavior shows.
 5. Be brutally objective, practical, and highly analytical, but use SIMPLE, ACCESSIBLE language.
-6. CRITICAL: Respond entirely in the user's primary language. Format beautifully with markdown.
+6. CRITICAL: Respond entirely in {language}. Format beautifully with markdown.
 """
     try:
         response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)

@@ -9,11 +9,11 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from dotenv import load_dotenv
-from database import get_profile, get_episodes, get_messages, get_all_people, supabase
+from database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile
 from chat import get_response
 from analyzer import analyze_image, analyze_document, analyze_voice
 from extractor import generate_daily_summary, generate_weekly_summary, run_post_analysis_tasks, set_alert_callback
-from bot_commands import (get_mood_keyboard, mood_command, sos_command, export_command, help_command, profile_command, evolution_command, episodes_command, people_command, reflect_command, week_command, mood_callback, contract_command, reset_command, flashback_command, dossier_command, setcompass_command)
+from bot_commands import (localize, get_mood_keyboard, mood_command, sos_command, export_command, help_command, profile_command, evolution_command, episodes_command, people_command, reflect_command, week_command, mood_callback, contract_command, reset_command, flashback_command, dossier_command, setcompass_command)
 from bot_jobs import proactive_check_job, daily_maintenance_job
 from google import genai
 from google.genai import types
@@ -54,20 +54,24 @@ async def send_proactive_alert(user_id: str, text: str):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
+    
+    profile = await asyncio.to_thread(get_profile, user_id)
+    if not profile:
+        profile = {}
+    if not profile.get("language") and update.effective_user.language_code:
+        profile["language"] = update.effective_user.language_code
+        await asyncio.to_thread(save_profile, user_id, profile)
+
     user_sessions[user_id] = True
     await asyncio.to_thread(lambda: supabase.table("messages").delete().eq("user_id", user_id).execute())
     welcome_text = (
         "Hello. I am MYRROR.\n\n"
         "I am not a standard assistant. I am here to be a mirror for your mind, to help you track your growth, and to remember what matters to you.\n"
         "You can text me, send me voice notes, images, or documents. Over time, I will learn your patterns and support you.\n\n"
-        "Tell me, what brings you here today?\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Hola. Soy MYRROR.\n\n"
-        "No soy un asistente estándar. Estoy aquí para ser un espejo de tu mente, ayudarte a ver tu crecimiento y recordar lo que te importa.\n"
-        "Puedes escribirme, enviarme audios, imágenes o documentos. Con el tiempo, aprenderé tus patrones y te apoyaré.\n\n"
-        "Dime, ¿qué te trae por aquí hoy?"
+        "Tell me, what brings you here today?"
     )
-    await update.message.reply_text(welcome_text)
+    msg = await localize(user_id, welcome_text, profile)
+    await update.message.reply_text(msg)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -101,7 +105,8 @@ User Profile: {json.dumps(profile)}"""
         await update.message.reply_text(f"🧠 **MYRROR Test**\n\n{data['question']}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Quiz error: {e}")
-        await update.message.reply_text("I couldn't generate a quiz right now.")
+        msg_err = await localize(user_id, "I couldn't generate a quiz right now.")
+        await update.message.reply_text(msg_err)
 
 async def quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -109,10 +114,12 @@ async def quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(query.from_user.id)
     idx = int(query.data.split("_")[1])
     
-    options = user_quiz_options.get(user_id, [])
+    # MEMORY LEAK FIX: Pop to free up RAM after user answers
+    options = user_quiz_options.pop(user_id, [])
     chosen = options[idx] if idx < len(options) else "An unknown option"
     
-    await query.edit_message_text(text=f"{query.message.text}\n\n✅ **You chose:** {chosen}", parse_mode="Markdown")
+    msg_chose = await localize(user_id, "✅ **You chose:**")
+    await query.edit_message_text(text=f"{query.message.text}\n\n{msg_chose} {chosen}", parse_mode="Markdown")
     
     content = f"[Quiz Answer] I chose: {chosen}"
     await process_message(update, user_id, content, False)
@@ -132,7 +139,8 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await context.bot.get_file(photo.file_id)
     file_bytes = await file.download_as_bytearray()
     caption = update.message.caption or "Analyze this image and tell me what you think."
-    status_msg = await update.message.reply_text("👁️ *Analyzing image... / Analizando imagen...*", parse_mode="Markdown")
+    msg_status = await localize(user_id, "👁️ *Analyzing image...*")
+    status_msg = await update.message.reply_text(msg_status, parse_mode="Markdown")
     try:
         text = await analyze_image(user_id, file_bytes, caption)
         profile = await asyncio.to_thread(get_profile, user_id)
@@ -140,12 +148,14 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(text)
     except Exception as e:
         logger.error(f"Image handler error for {user_id}: {e}", exc_info=True)
-        await status_msg.edit_text("I had trouble reading that image. Try again in a moment.")
+        msg_err = await localize(user_id, "I had trouble reading that image. Try again in a moment.")
+        await status_msg.edit_text(msg_err)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     await update.message.chat.send_action("typing")
-    status_msg = await update.message.reply_text("🎧 *Listening... / Escuchando...*", parse_mode="Markdown")
+    msg_status = await localize(user_id, "🎧 *Listening...*")
+    status_msg = await update.message.reply_text(msg_status, parse_mode="Markdown")
     voice = update.message.voice
     file = await context.bot.get_file(voice.file_id)
     file_bytes = await file.download_as_bytearray()
@@ -157,7 +167,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await process_message(update, user_id, content, False)
     except Exception as e:
         logger.error(f"Voice handler error for {user_id}: {e}", exc_info=True)
-        await status_msg.edit_text("I had trouble listening to your voice message. Can you type it?")
+        msg_err = await localize(user_id, "I had trouble listening to your voice message. Can you type it?")
+        await status_msg.edit_text(msg_err)
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -165,20 +176,23 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mime = document.mime_type or ""
     caption = update.message.caption or "Analyze this file and tell me what you think."
     await update.message.chat.send_action("typing")
-    status_msg = await update.message.reply_text("📄 *Reading document... / Leyendo documento...*", parse_mode="Markdown")
+    msg_status = await localize(user_id, "📄 *Reading document...*")
+    status_msg = await update.message.reply_text(msg_status, parse_mode="Markdown")
     file = await context.bot.get_file(document.file_id)
     file_bytes = await file.download_as_bytearray()
     try:
         text = await analyze_document(user_id, file_bytes, mime, document.file_name, caption)
         if not text:
-            await status_msg.edit_text("I can't read that file type yet. Try .txt, .pdf, or an image.")
+            msg_err = await localize(user_id, "I can't read that file type yet. Try .txt, .pdf, or an image.")
+            await status_msg.edit_text(msg_err)
             return
         profile = await asyncio.to_thread(get_profile, user_id)
         asyncio.create_task(run_post_analysis_tasks(user_id, f"file:{document.file_name}", f"File: {caption}", text, profile))
         await status_msg.edit_text(text)
     except Exception as e:
         logger.error(f"Document handler error for {user_id}: {e}", exc_info=True)
-        await status_msg.edit_text("I had trouble reading that file. Try again in a moment.")
+        msg_err = await localize(user_id, "I had trouble reading that file. Try again in a moment.")
+        await status_msg.edit_text(msg_err)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MESSAGE HANDLER
@@ -201,6 +215,10 @@ async def process_message(update: Update, user_id: str, content: str, is_new_ses
                 pass
 
         text = await get_response(user_id, content, is_new_session)
+        
+        # Organic typing simulation (delays response slightly based on length)
+        typing_delay = min(len(text) / 80.0, 3.5) # Roughly 80 chars per second, cap at 3.5s
+        await asyncio.sleep(typing_delay)
         
         lower_text = text.lower()
         mood_triggers = [
@@ -227,7 +245,8 @@ async def process_message(update: Update, user_id: str, content: str, is_new_ses
 
     except Exception as e:
         logger.error(f"Message processing error for {user_id}: {e}", exc_info=True)
-        await update.message.reply_text("I'm having trouble thinking right now. Try again in a moment.")
+        msg_err = await localize(user_id, "I'm having trouble thinking right now. Try again in a moment.")
+        await update.message.reply_text(msg_err)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
