@@ -32,9 +32,6 @@ user_message_buffers = {}
 user_quiz_options = {}
 telegram_app = None
 
-COOLDOWN_SECONDS = 3
-MIN_MESSAGE_LENGTH = 2
-
 
 class QuizSchema(BaseModel):
     question: str
@@ -122,7 +119,7 @@ async def quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text=f"{query.message.text}\n\n{msg_chose} {chosen}", parse_mode="Markdown")
     
     content = f"[Quiz Answer] I chose: {chosen}"
-    await process_message(update, user_id, content, False)
+    await process_message(update, context, user_id, content, False)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # RELAPSE DETECTION
@@ -164,7 +161,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.delete()
         if text:
             content = f"[Voice Message] {text}"
-            await process_message(update, user_id, content, False)
+            await process_message(update, context, user_id, content, False)
     except Exception as e:
         logger.error(f"Voice handler error for {user_id}: {e}", exc_info=True)
         msg_err = await localize(user_id, "I had trouble listening to your voice message. Can you type it?")
@@ -198,8 +195,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MESSAGE HANDLER
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def process_message(update: Update, user_id: str, content: str, is_new_session: bool):
-    await update.message.chat.send_action("typing")
+async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str, content: str, is_new_session: bool):
+    async def keep_typing():
+        try:
+            while True:
+                await update.message.chat.send_action("typing")
+                await asyncio.sleep(4) # Refresh typing action before Telegram's 5s timeout
+        except asyncio.CancelledError:
+            pass
+            
+    typing_task = asyncio.create_task(keep_typing())
 
     try:
         profile = await asyncio.to_thread(get_profile, user_id)
@@ -216,8 +221,16 @@ async def process_message(update: Update, user_id: str, content: str, is_new_ses
 
         text = await get_response(user_id, content, is_new_session)
         
-        # Organic typing simulation (delays response slightly based on length)
-        typing_delay = min(len(text) / 80.0, 3.5) # Roughly 80 chars per second, cap at 3.5s
+        # Dynamic typing simulation based on mood (slower when sad, faster when energetic)
+        mood = profile.get("current_mood_score", 5)
+        speed_chars_per_sec = 80.0
+        if mood and isinstance(mood, (int, float)):
+            if mood <= 4:
+                speed_chars_per_sec = 50.0  # Slower, delicate typing
+            elif mood >= 7:
+                speed_chars_per_sec = 100.0 # Faster, energetic typing
+                
+        typing_delay = min(len(text) / speed_chars_per_sec, 4.0)
         await asyncio.sleep(typing_delay)
         
         lower_text = text.lower()
@@ -247,12 +260,25 @@ async def process_message(update: Update, user_id: str, content: str, is_new_ses
         logger.error(f"Message processing error for {user_id}: {e}", exc_info=True)
         msg_err = await localize(user_id, "I'm having trouble thinking right now. Try again in a moment.")
         await update.message.reply_text(msg_err)
+    finally:
+        typing_task.cancel()
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     content = update.message.text.strip()
 
-    if len(content) < MIN_MESSAGE_LENGTH:
+    profile = await asyncio.to_thread(get_profile, user_id)
+    
+    # Dynamic cooldown based on communication style
+    cooldown = 3.0
+    if profile:
+        comm_style = str(profile.get("communication_style", "")).lower()
+        if "rapid" in comm_style or "burst" in comm_style or "short" in comm_style:
+            cooldown = 4.5 # Wait longer for them to finish their burst
+        elif "slow" in comm_style or "thoughtful" in comm_style or "long" in comm_style:
+            cooldown = 2.0 # They write in single big chunks, respond faster
+
+    if len(content) < 2:
         return
 
     # Add message to the user's temporary burst buffer
@@ -265,7 +291,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async def debounced():
         try:
-            await asyncio.sleep(COOLDOWN_SECONDS)
+            await asyncio.sleep(cooldown)
             
             await update.message.chat.send_action("typing")
             
@@ -278,7 +304,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if is_burst:
                 final_content = f"[RAPID BURST OF MESSAGES - VENTING DETECTED]\n{combined_content}"
             
-            await process_message(update, user_id, final_content, is_new_session)
+            await process_message(update, context, user_id, final_content, is_new_session)
         except asyncio.CancelledError:
             pass
         finally:

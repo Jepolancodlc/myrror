@@ -26,7 +26,11 @@ def detect_crisis(content: str, history: list, profile: dict) -> bool:
     content_lower = content.lower()
     keyword_hit = any(kw in content_lower for kw in crisis_keywords)
     hour = datetime.now().hour
-    unusual_hour = hour >= 23 or hour <= 5
+    
+    # Dynamic anomaly detection: avoid triggering if they are naturally a night owl
+    habits = str(profile.get("behavioral_patterns", "")).lower() + str(profile.get("quirks_and_micro_details", "")).lower()
+    is_night_owl = "night owl" in habits or "late night" in habits or "stays up" in habits
+    unusual_hour = (hour >= 23 or hour <= 5) and not is_night_owl
 
     last = profile.get("last_conversation", "")
     long_silence = False
@@ -101,9 +105,35 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
     now_str = now_dt.strftime("%Y-%m-%d %H:%M")
     day_of_week = now_dt.strftime("%A")
     last = profile.get("last_conversation", "")
-    ctx += f"\n\nCURRENT TIME: {now_str} ({day_of_week}). Use this time context naturally if relevant (e.g., late at night, early Monday morning)."
+    ctx += f"\n\nCURRENT TIME: {now_str} ({day_of_week})."
     if last:
         ctx += f"\nLAST CONVERSATION: {last}"
+
+    # CIRCADIAN RHYTHM & REACTIVE GREETINGS
+    hours_since_last = 24
+    if last:
+        try:
+            last_dt = datetime.strptime(last, "%Y-%m-%d %H:%M")
+            hours_since_last = (now_dt - last_dt).total_seconds() / 3600
+        except:
+            pass
+
+    if hours_since_last > 6 or new_session:
+        hour = now_dt.hour
+        
+        habits = str(profile.get("behavioral_patterns", "")).lower()
+        is_night_owl = "night owl" in habits or "late night" in habits
+        
+        if (2 <= hour <= 5) and not is_night_owl:
+            ctx += "\n\nTIME ANOMALY (LATE NIGHT/INSOMNIA): It is the middle of the night for a normally diurnal user. Check their text quality. Are there unusual typos or fragmented sentences? If so, gently deduce if they are sleep-deprived, drunk, or spiraling. Tell them to get some sleep."
+        elif (2 <= hour <= 5) and is_night_owl:
+            ctx += "\n\nTIME CONTEXT (NIGHT OWL): It's late, but this is their usual active time. Match their late-night philosophical or relaxed energy without judging their sleep schedule."
+        elif 6 <= hour <= 9:
+            ctx += "\n\nTIME ANOMALY (EARLY MORNING): It's very early. Greet them accordingly and ask what's on their mind for the day."
+        elif day_of_week == "Friday" and hour >= 18:
+            ctx += "\n\nTIME CONTEXT (FRIDAY EVENING): The work week is over. Ask how they plan to decompress or if they are burnt out."
+        elif day_of_week == "Sunday" and hour >= 18:
+            ctx += "\n\nTIME CONTEXT (SUNDAY SCARIES): It's Sunday evening. Gently check in on their anxiety or preparation for the upcoming week."
 
     if new_session:
         ctx += "\n\nThe user explicitly started a new session."
@@ -117,8 +147,27 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
     word_count = len(content.split())
     if word_count <= 10:
         ctx += "\n\nLENGTH MATCHING: The user sent a very short message. Keep your response brief, casual, and punchy. DO NOT write a wall of text. DO NOT over-analyze a simple statement."
-    elif word_count >= 100:
-        ctx += "\n\nLENGTH MATCHING: The user wrote a long, detailed message. Take your time to unpack it. A slightly longer, deeper, and highly structured response is appropriate here."
+        
+        # APATHY / RESISTANCE DETECTION
+        short_count = 0
+        if recent_history:
+            for m in reversed(recent_history):
+                if m["role"] == "user":
+                    if len(m["content"].split()) <= 5:
+                        short_count += 1
+                    else:
+                        break
+        if short_count >= 3:
+            ctx += "\n\nAPATHY/RESISTANCE DETECTED: The user has given you extremely short answers multiple times in a row. They are resisting or disengaged. STOP carrying the conversation. Call out their withdrawal gently but firmly (e.g., 'You are not really here right now, are you?' or 'I will leave you be until you actually want to talk'). Give them space."
+            
+    elif word_count >= 150:
+        ctx += "\n\nCOGNITIVE OVERWHELM PROTOCOL: The user just dumped a massive wall of text. DO NOT reply with an equally massive block of text. That feels robotic and overwhelming. Pick the ONE most emotionally painful, contradictory, or important thread in their text and address ONLY that. Ignore the rest for now. Say something like 'You said a lot just now, but I want to stop at this one thing...' Keep your response asymmetrical and grounded."
+
+    # Absolute / Black-and-White Thinking Detection
+    absolutes = ["always", "never", "everyone", "nobody", "ruined", "impossible", "siempre", "nunca", "nadie", "todos", "imposible", "todo el mundo"]
+    content_lower_words = content_lower.split()
+    if sum(1 for w in absolutes if w in content_lower_words) >= 2:
+        ctx += "\n\nABSOLUTE THINKING DETECTED: The user is using extreme absolutes ('always', 'never', 'everyone', etc.). Gently but firmly challenge this black-and-white thinking. Remind them that reality is rarely that absolute."
 
     # Conversational context (Moved UP to enhance RAG precision)
     conv_ctx = ""
@@ -130,7 +179,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
 
     # Venting Detection
     if "[RAPID BURST OF MESSAGES - VENTING DETECTED]" in content:
-        ctx += "\n\nURGENT CONTEXT: The user just sent multiple messages in rapid succession. They are likely venting, anxious, or overwhelmed. PROTOCOL: Do not interrupt or try to 'fix' their problem immediately. Validate their emotion, acknowledge the overwhelm, and provide a calm, grounding anchor."
+        ctx += "\n\nURGENT CONTEXT: The user just sent multiple messages in rapid succession. They are likely venting, anxious, or in a cognitive loop. PROTOCOL: Interrupt the loop. Recommend a quick PHYSICAL or MENTAL grounding exercise (e.g., 'put your phone down and drink a glass of water', 'take 3 deep breaths', 'write this on paper'). Do not do deep psychoanalysis until they are grounded."
 
     # Dynamic Stance based on Mood
     mood = profile.get("current_mood_score")
@@ -160,6 +209,14 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         except Exception as e:
             logger.error(f"Mood stance error: {e}")
             
+    volatility = profile.get("emotional_volatility")
+    if volatility and not in_crisis:
+        vol_lower = volatility.lower()
+        if "volatile" in vol_lower or "erratic" in vol_lower or "fluctuating" in vol_lower:
+            ctx += f"\n\nEMOTIONAL VOLATILITY DETECTED: The user is currently emotionally volatile ({volatility}). Act as a grounding anchor. Be exceptionally calm, consistent, and do not react dramatically to their highs or lows."
+        elif "numb" in vol_lower or "disconnected" in vol_lower:
+            ctx += f"\n\nEMOTIONAL NUMBING DETECTED: The user feels numb or disconnected ({volatility}). Gently probe to reconnect them with their feelings without forcing it."
+
     strategy = profile.get("myrror_strategy")
     if strategy:
         ctx += f"\n\nYOUR MASTER STRATEGY FOR THIS USER: {strategy}\nExecute this subtly but consistently."
@@ -187,12 +244,14 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         job = profile.get("job")
         skills = profile.get("skills")
         culture = profile.get("cultural_background")
-        if job or skills or culture:
-            ctx += "\n\nWORLDVIEW & METAPHORS:"
+        tastes = profile.get("media_and_tastes")
+        if job or skills or culture or tastes:
+            ctx += "\n\nWORLDVIEW & CULTURAL METAPHORS:"
             if job: ctx += f"\n- Profession/Job: {job}"
             if skills: ctx += f"\n- Skills/Interests: {skills}"
             if culture: ctx += f"\n- Cultural Background: {culture}"
-            ctx += "\nADAPTATION: Speak their language. Use analogies, metaphors, and examples drawn directly from their specific profession, skills, and background to make your insights resonate deeply and feel tailor-made."
+            if tastes: ctx += f"\n- Music, Movies & Hobbies: {tastes}"
+            ctx += "\nADAPTATION: Speak their language. Use analogies and metaphors drawn directly from their specific profession, tastes (books/movies/music), and background to make your insights resonate deeply."
 
         pending = []
         if profile.get("upcoming_events"): pending.append(f"Events: {profile.get('upcoming_events')}")
@@ -204,7 +263,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         compass = profile.get("life_compass")
         if compass:
             ctx += f"\n\nTHEIR LIFE COMPASS (What grounds them / gives them meaning): {compass}"
-            ctx += "\nIf the user feels lost, drifting, or hopeless, gently remind them of this core purpose. Guide them back to their center."
+            ctx += "\nDRIFT DETECTION: If they are obsessing over trivial drama or acting impulsively, gently hold up their Life Compass. Ask them if what they are stressing about aligns with who they want to be. Pull them out of the weeds."
             
         manual = profile.get("interaction_manual")
         if manual:
@@ -248,6 +307,11 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
             ctx += f"\n\nTHEIR CONTRADICTIONS & BLIND SPOTS: {contradictions}"
             ctx += "\nIf the user is complaining about a situation they caused, or acting against their own goals, gently but firmly point out this contradiction. Hold up the mirror."
             
+        avoidance = profile.get("avoidance_patterns")
+        if avoidance:
+            ctx += f"\n\nTHEIR AVOIDANCE PATTERNS: {avoidance}"
+            ctx += "\nWatch them closely. If they exhibit these exact deflection tactics right now to avoid a hard truth, call it out gently: 'You're doing that thing again where you change the subject...'"
+            
         clinical = profile.get("clinical_profile")
         if clinical:
             ctx += f"\n\nTHEIR CLINICAL PERSONALITY PROFILE (Big Five / Enneagram): {clinical}"
@@ -264,8 +328,8 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
                 ctx += f"\n- {shift['date']}: {shift['field']} changed: {shift['note']}"
             ctx += "\nIMPORTANT: Acknowledge this fluidity. They are not static. Treat them as who they are becoming today, not just who they were yesterday."
 
-        ctx += "\n\nGUIDANCE PROTOCOL (SOCRATIC METHOD):"
-        ctx += "\nDo not just give the user the answers or lecture them. Instead, ask the *one right question* that forces them to realize the truth themselves. Guide them to their own epiphanies."
+        ctx += "\n\nGUIDANCE PROTOCOL (DYNAMIC CLOSURE):"
+        ctx += "\nDo not just give the answers or lecture. Guide them to their own epiphanies. Use SOCRATIC SILENCE when they are venting, ask ONE penetrating question when they are stuck, or use VERBATIM MIRRORING to show them their own contradictions. NEVER force a question if a supportive statement or silence is more natural."
 
     # Semantic RAG Memory Engine
     # Solo buscamos en la memoria si el mensaje tiene sustancia (evita buscar recuerdos para "sí", "ok", "jaja")
@@ -291,13 +355,16 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
                         try:
                             ep_date = datetime.strptime(ep_date_str, "%Y-%m-%d").date()
                             days_ago = (now_date - ep_date).days
-                            time_ctx = "today" if days_ago == 0 else ("yesterday" if days_ago == 1 else f"{days_ago} days ago")
+                            if days_ago == 0: time_ctx = "today"
+                            elif days_ago == 1: time_ctx = "yesterday"
+                            elif days_ago > 90: time_ctx = "a long time ago"
+                            else: time_ctx = f"{days_ago} days ago"
                         except:
                             time_ctx = ep_date_str
                         eps_list.append(f"- [{time_ctx}] {ep.get('event')}")
                     eps_text = "\n".join(eps_list)
                     ctx += f"\n\nRELEVANT PAST MEMORIES (Triggered by what the user just said):\n{eps_text}"
-                    ctx += "\nCRITICAL ADVICE PROTOCOL (STEALTH MEMORY): Use these past memories INVISIBLY. Sound like a human who just remembered something naturally. Say things like 'Wait, didn't this happen back when...?' or 'This reminds me of...'. Draw advice from their OWN past track record, and use exact quotes to break through denial. DO NOT sound like an AI retrieving data."
+                    ctx += "\nCRITICAL ADVICE PROTOCOL (STEALTH MEMORY): Use these past memories INVISIBLY. Sound like a human who just remembered something naturally. If the memory is from 'a long time ago', mention how long it's been. Draw advice from their OWN past track record, and use exact quotes to break through denial."
         except Exception as e:
             logger.error(f"RAG search error for {user_id}: {e}", exc_info=True)
 

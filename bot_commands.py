@@ -467,7 +467,14 @@ async def flashback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     date = episode.get("created_at", "")[:10]
     profile = await asyncio.to_thread(get_profile, user_id)
     cognition = profile.get("cognition_style", "Balanced")
-    prompt = f"The user experienced this event on {date}: '{event}'. Ask a deeply thoughtful, curious question about how they feel about it now, or how it shaped them since then. Keep it to one brief paragraph.\n\nADAPT TO THEIR MIND: Their cognition style is '{cognition}'. Tailor the angle of the question to how their brain processes reality (e.g., logical/framework-based vs emotional/internal).\n\nCRITICAL: Respond entirely in the user's primary language."
+    tastes = profile.get("media_and_tastes")
+    
+    prompt = f"The user experienced this event on {date}: '{event}'. Ask a deeply thoughtful, curious question about how they feel about it now, or how it shaped them since then. Keep it to one brief paragraph.\n\nADAPT TO THEIR MIND: Their cognition style is '{cognition}'. Tailor the angle of the question to how their brain processes reality (e.g., logical/framework-based vs emotional/internal)."
+    
+    if tastes:
+        prompt += f"\n\nCULTURAL ANCHORING: You know the user likes these books, movies, music or hobbies: {tastes}. If it fits naturally, use a subtle metaphor or reference from their cultural tastes to frame this memory. Make it feel like a friend reminding them of a song or quote that perfectly describes that moment in their past."
+        
+    prompt += "\n\nCRITICAL: Respond entirely in the user's primary language."
     await update.message.chat.send_action("typing")
     try:
         response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)

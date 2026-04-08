@@ -66,10 +66,11 @@ async def analyze_image(user_id: str, file_bytes: bytearray, caption: str) -> st
                             "INSTRUCTIONS:\n"
                             "1. Analyze the image as MYRROR. Look beyond the obvious.\n"
                             "2. Notice the environment, mood, lighting, and hidden details.\n"
-                            "3. Connect this visual to their psychological profile. Why did they share this with you right now?\n"
-                            "4. Be brutally honest, highly observant, and deeply personal, but use simple, easy-to-understand language.\n"
-                            "5. NATURAL REACTION: If the image is casual/everyday, react casually. If it's profound, be profound. DO NOT force a deep Socratic question if it doesn't fit the context naturally.\n"
-                            "6. CRITICAL: You MUST reply entirely in the user's language."
+                            "3. MUSIC/LYRICS DETECTION: If the image is a screenshot of a music app (Spotify, Apple Music) or contains lyrics, explicitly identify the song and artist. Use the meaning of the song/lyrics as a window into their current emotional state.\n"
+                            "4. Connect this visual to their psychological profile. Why did they share this with you right now?\n"
+                            "5. Be brutally honest, highly observant, and deeply personal, but use simple, easy-to-understand language.\n"
+                            "6. NATURAL REACTION: If the image is casual/everyday, react casually. If it's profound, be profound. DO NOT force a deep Socratic question if it doesn't fit the context naturally.\n"
+                            "7. CRITICAL: You MUST reply entirely in the user's language."
                         )},
                         {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
                     ]

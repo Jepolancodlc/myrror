@@ -65,8 +65,12 @@ class ProfileSchema(BaseModel):
     personality_traits: Optional[List[str]] = Field(default=None)
     emotional_state: Optional[str] = Field(default=None)
     emotional_patterns: Optional[List[str]] = Field(default=None)
+    media_and_tastes: Optional[List[str]] = Field(default=None, description="Books, music, movies, hobbies, or art they consume")
+    avoidance_patterns: Optional[List[str]] = Field(default=None, description="Topics they actively dodge or how they deflect hard questions")
+    emotional_volatility: Optional[str] = Field(default=None, description="Assessment of their emotional stability (e.g., stable, highly volatile, numbed, erratic)")
     communication_style: Optional[str] = Field(default=None)
     relationship_patterns: Optional[List[str]] = Field(default=None)
+    state_of_mind_anomalies: Optional[List[str]] = Field(default=None, description="Instances of altered states: sleep deprivation, intoxication, manic bursts, etc.")
     core_values: Optional[List[str]] = Field(default=None)
     humor_style: Optional[str] = Field(default=None)
     decision_making: Optional[str] = Field(default=None)
@@ -108,8 +112,31 @@ class EpisodeSchema(BaseModel):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def evaluate_and_send_epiphany(user_id: str, profile: dict, shifts: list):
+    # DYNAMIC THROTTLE: Adapt cooldown based on conversation frequency
+    total_convs = profile.get("total_conversations", 1)
+    
+    throttle_seconds = 86400 # 24 hours default
+    if total_convs > 100:
+        throttle_seconds = 43200 # 12 hours for highly active users
+    elif total_convs < 20:
+        throttle_seconds = 172800 # 48 hours for infrequent users
+        
+    last_epi = profile.get("last_epiphany", "")
+    if last_epi:
+        try:
+            last_dt = datetime.strptime(last_epi, "%Y-%m-%d %H:%M")
+            if (datetime.now() - last_dt).total_seconds() < throttle_seconds:
+                return
+        except:
+            pass
+
     # Humanize: wait 15-30 seconds so it feels like a sudden realization after the chat
     await asyncio.sleep(random.randint(15, 30))
+    
+    # COLLISION AVOIDANCE: Ensure the user hasn't sent another message while we were sleeping
+    recent = await asyncio.to_thread(get_messages, user_id, 1)
+    if recent and (datetime.now().timestamp() - datetime.fromisoformat(recent[0]['created_at']).timestamp()) < 30:
+        return # They are actively typing, don't interrupt them
     
     shift_text = "\n".join([f"- {s['field']}: changed from '{s['from']}' to '{s['to']}'" for s in shifts])
     
@@ -145,6 +172,9 @@ Format cleanly. Respond in {language}.
             await alert_callback(user_id, text)
             # Save this epiphany as a message so it's in the history and MYRROR remembers sending it
             await asyncio.to_thread(save_message, user_id, "assistant", f"[Proactive Epiphany] {text}")
+            
+            profile["last_epiphany"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            await asyncio.to_thread(save_profile, user_id, profile)
     except Exception as e:
         logger.error(f"Epiphany generation error: {e}", exc_info=True)
 
@@ -175,7 +205,8 @@ def deep_merge(base: dict, updates: dict) -> dict:
         "emotional_patterns", "relationship_patterns", "core_beliefs",
         "cognitive_biases", "unspoken_fears", "unmet_needs", "shadow_traits",
         "goals", "fears", "strengths", "weaknesses", "personality_traits",
-        "life_situations", "failed_advice", "detected_patterns", "contradictions"
+        "life_situations", "failed_advice", "detected_patterns", "contradictions",
+        "media_and_tastes", "avoidance_patterns", "state_of_mind_anomalies"
     }
     
     for key, value in updates.items():
@@ -207,7 +238,8 @@ def track_evolution(profile: dict, new_data: dict) -> list:
         "myrror_strategy", "core_beliefs", "cognitive_biases", "unspoken_fears", 
         "unmet_needs", "interaction_manual", "attachment_style", "shadow_traits",
         "clinical_profile", "unrealized_truths", "behavioral_patterns",
-        "quirks_and_micro_details", "cognition_style", "psyche_and_motivations"
+        "quirks_and_micro_details", "cognition_style", "psyche_and_motivations",
+        "avoidance_patterns"
     ]
     evolution = profile.get("evolution", [])[-49:] # Mantener un límite de los últimos 50 registros para evitar explosión de tokens
     now = datetime.now().strftime("%Y-%m-%d")
@@ -308,6 +340,8 @@ def get_profile_for_context(profile: dict, context: str) -> str:
         "communication_style": profile.get("communication_style"),
         "humor_style": profile.get("humor_style"),
         "preferred_tone": profile.get("preferred_tone"),
+        "media_and_tastes": profile.get("media_and_tastes"),
+        "avoidance_patterns": profile.get("avoidance_patterns"),
     }
 
     context_lower = context.lower()
@@ -436,7 +470,11 @@ YOUR TASK:
 Extract EVERYTHING about the USER. Update their "Profile Dossier" comprehensively:
 - Personality Summary: Detailed analysis of their psyche, archetype, and underlying motivations.
 - Communication & Cognition Style: How they process information (logical, emotional, impulsive, reflective).
+- Emotional Volatility: Assess if their mood is stable, erratic, numbed, or intensely fluctuating.
 - Behavioral Patterns: Habits, frequent moods, and quirks.
+- Tastes & Media: Explicit interests in music, movies, reading, or hobbies.
+- Avoidance Patterns: Identify what topics they dodge and how they change the subject.
+- State of Mind Anomalies: Detect if their writing suggests they are sleep-deprived, intoxicated, or in a manic spiral based on typos, pacing, and timestamps.
 - Evolution Log: What has changed in the user since the first interactions (handled automatically, but focus on capturing new states).
 
 Also look for: upcoming events, explicit facts, attachment_style, hidden fears,
@@ -528,6 +566,7 @@ CRITICAL RULES for Extraction:
 5. If there is NO highly significant event to record, you MUST return an empty list: [].
 6. If there is an event, describe it in the third person (e.g., "{user_name} realized they were using relationships to avoid loneliness").
 7. DUPLICATE PREVENTION: If the event is already in the 'RECENTLY EXTRACTED EPISODES' list, or the user is just rehashing the same complaint without new developments, DO NOT extract it. Return [].
+8. NO META-MEMORIES: Never extract "The user talked to MYRROR about..." or "The user realized with the AI...". Extract the actual real-world fact (e.g., "The user got fired", NOT "The user told the AI they got fired").
 """
     try:
         result = await client.aio.models.generate_content(
