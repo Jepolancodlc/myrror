@@ -32,6 +32,28 @@ def get_mood_keyboard():
         ]
     ])
 
+async def localize(user_id: str, text: str, profile: dict = None) -> str:
+    if profile is None:
+        profile = await asyncio.to_thread(get_profile, user_id)
+    if not profile:
+        return text
+    prompt = f"""Translate the following text into the primary language the user speaks.
+Look at their profile to determine their language (e.g., if they speak Spanish, translate to Spanish).
+If you cannot determine their language, leave it in English.
+CRITICAL: Maintain the exact same formatting, Markdown, and emojis. Do NOT add any conversational text.
+
+USER PROFILE:
+{json.dumps(profile, ensure_ascii=False)}
+
+TEXT TO TRANSLATE:
+{text}"""
+    try:
+        response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"Localization error: {e}")
+        return text
+
 async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     profile = await asyncio.to_thread(get_profile, user_id)
@@ -39,7 +61,8 @@ async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     mood_data = [e for e in evolution if e.get("field") == "current_mood_score"]
     if len(mood_data) < 2:
-        await update.message.reply_text("I need more conversations with you to track your mood evolution. Keep talking to me!")
+        msg = await localize(user_id, "I need more conversations with you to track your mood evolution. Keep talking to me!", profile)
+        await update.message.reply_text(msg)
         return
 
     try:
@@ -66,14 +89,16 @@ async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         plt.close(fig)
         plt.close('all') # Limpieza profunda del backend Agg
 
-        await update.message.reply_photo(photo=buf, caption="Here is how your mood has been trending.")
+        msg_cap = await localize(user_id, "Here is how your mood has been trending.", profile)
+        await update.message.reply_photo(photo=buf, caption=msg_cap)
     except ImportError:
         await update.message.reply_text("Visual tracking requires matplotlib. (Run: pip install matplotlib)")
     except Exception as e:
         logger.error(f"Mood graph error: {e}")
-        await update.message.reply_text("I couldn't generate the mood graph right now.")
+        await update.message.reply_text(await localize(user_id, "I couldn't generate the mood graph right now.", profile))
 
 async def sos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
     text = (
         "🚨 **CRISIS RESOURCES** 🚨\n\n"
         "I am an AI. I care about you, but I cannot replace real medical or psychological help.\n"
@@ -83,7 +108,8 @@ async def sos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• **Global Helplines:** https://findahelpline.com/\n\n"
         "You are not alone. Please talk to a professional."
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    msg = await localize(user_id, text)
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -96,10 +122,11 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(
         document=file_bytes,
         filename=f"myrror_backup.json",
-        caption="Here is a complete backup of your psychological profile and episodes."
+        caption=await localize(user_id, "Here is a complete backup of your psychological profile and episodes.", profile)
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
     text = (
         "Here is what you can ask me to do:\n\n"
         "🧠 **Self-Discovery**\n"
@@ -121,13 +148,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /export - Download a full backup of your data\n"
         "• /reset - Erase all your history and start completely fresh"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    msg = await localize(user_id, text)
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     profile = await asyncio.to_thread(get_profile, user_id)
     if not profile:
-        await update.message.reply_text("I don't know anything about you yet. Talk to me first.")
+        msg = await localize(user_id, "I don't know anything about you yet. Talk to me first.", profile)
+        await update.message.reply_text(msg)
         return
     skip = ["evolution", "confidence", "last_conversation", "total_conversations"]
     lines = ["Here's what I know about you:\n"]
@@ -139,7 +168,8 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "total_conversations" in profile:
         lines.append(f"Total conversations: {profile['total_conversations']}")
         
-    await update.message.reply_text("\n".join(lines))
+    msg = await localize(user_id, "\n".join(lines), profile)
+    await update.message.reply_text(msg)
     
     big_five = profile.get("clinical_profile", {}).get("big_five")
     if isinstance(big_five, dict) and len(big_five) >= 5:
@@ -179,7 +209,8 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             plt.close(fig)
             plt.close('all')
             
-            await update.message.reply_photo(photo=buf, caption="This is the shape of your personality based on our interactions.")
+            msg_cap = await localize(user_id, "This is the shape of your personality based on our interactions.", profile)
+            await update.message.reply_photo(photo=buf, caption=msg_cap)
         except Exception as e:
             logger.error(f"Radar chart error: {e}")
 
@@ -187,7 +218,8 @@ async def dossier_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     profile = await asyncio.to_thread(get_profile, user_id)
     if not profile:
-        await update.message.reply_text("I need to observe you more before compiling your psychological dossier.")
+        msg = await localize(user_id, "I need to observe you more before compiling your psychological dossier.", profile)
+        await update.message.reply_text(msg)
         return
         
     lines = ["🗄️ *CONFIDENTIAL PSYCHOLOGICAL DOSSIER*\n"]
@@ -220,41 +252,51 @@ async def dossier_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"• {q}")
     
     if len(lines) == 1:
-        await update.message.reply_text("Your dossier is currently empty. Keep talking to me so I can analyze your patterns.")
+        msg = await localize(user_id, "Your dossier is currently empty. Keep talking to me so I can analyze your patterns.", profile)
+        await update.message.reply_text(msg)
         return
         
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    msg = await localize(user_id, "\n".join(lines), profile)
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def setcompass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     compass_text = " ".join(context.args)
     
     if not compass_text:
-        await update.message.reply_text("Please provide your life compass. Example:\n`/setcompass To build a legacy of kindness and create art that moves people.`", parse_mode="Markdown")
+        msg = await localize(user_id, "Please provide your life compass. Example:\n`/setcompass To build a legacy of kindness and create art that moves people.`")
+        await update.message.reply_text(msg, parse_mode="Markdown")
         return
         
     profile = await asyncio.to_thread(get_profile, user_id)
     profile["life_compass"] = compass_text
     await asyncio.to_thread(save_profile, user_id, profile)
-    await update.message.reply_text(f"🧭 **Life Compass Updated**\n\nI have anchored this to your core profile. I will use it to guide you back when you feel lost.", parse_mode="Markdown")
+    msg = await localize(user_id, "🧭 **Life Compass Updated**\n\nI have anchored this to your core profile. I will use it to guide you back when you feel lost.", profile)
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def evolution_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     profile = await asyncio.to_thread(get_profile, user_id)
     evolution = profile.get("evolution", [])
     if not evolution:
-        await update.message.reply_text("No changes tracked yet. Keep talking to me.")
+        msg = await localize(user_id, "No changes tracked yet. Keep talking to me.", profile)
+        await update.message.reply_text(msg)
         return
     lines = ["Your evolution over time:\n"]
+    confidence_map = profile.get("confidence", {})
     for e in evolution[-10:]:
-        lines.append(f"• {e['date']} — {e['field']}: {e['note']}")
-    await update.message.reply_text("\n".join(lines))
+        conf = e.get("confidence", confidence_map.get(e["field"], {}).get("level", "medium"))
+        conf_str = "🟢 High" if conf == "high" else "🟡 Medium"
+        lines.append(f"• {e['date']} — {e['field']} [{conf_str}]: {e['note']}")
+    msg = await localize(user_id, "\n".join(lines), profile)
+    await update.message.reply_text(msg)
 
 async def episodes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     episodes = await asyncio.to_thread(get_episodes, user_id, limit=15)
     if not episodes:
-        await update.message.reply_text("No significant episodes recorded yet.")
+        msg = await localize(user_id, "No significant episodes recorded yet.")
+        await update.message.reply_text(msg)
         return
     lines = ["Your story so far:\n"]
     for ep in reversed(episodes):
@@ -265,15 +307,18 @@ async def episodes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not event.startswith("Daily summary") and not event.startswith("Weekly summary"):
             lines.append(f"• {date} [{domain}] {event} ({impact})")
     if len(lines) == 1:
-        await update.message.reply_text("No significant episodes recorded yet.")
+        msg = await localize(user_id, "No significant episodes recorded yet.")
+        await update.message.reply_text(msg)
         return
-    await update.message.reply_text("\n".join(lines))
+    msg = await localize(user_id, "\n".join(lines))
+    await update.message.reply_text(msg)
 
 async def people_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     people = await asyncio.to_thread(get_all_people, user_id)
     if not people:
-        await update.message.reply_text("I don't know anyone in your life yet. Tell me about the people around you.")
+        msg = await localize(user_id, "I don't know anyone in your life yet. Tell me about the people around you.")
+        await update.message.reply_text(msg)
         return
     lines = ["People in your life:\n"]
     for p in people:
@@ -282,16 +327,19 @@ async def people_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         notes = p.get("notes", {})
         desc = notes.get("description", "") if isinstance(notes, dict) else ""
         lines.append(f"• {name} ({rel}){' — ' + desc if desc else ''}")
-    await update.message.reply_text("\n".join(lines))
+    msg = await localize(user_id, "\n".join(lines))
+    await update.message.reply_text(msg)
 
 async def reflect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     profile = await asyncio.to_thread(get_profile, user_id)
     episodes = await asyncio.to_thread(get_episodes, user_id, limit=20)
     if not profile:
-        await update.message.reply_text("I don't know you well enough yet. Talk to me more first.")
+        msg = await localize(user_id, "I don't know you well enough yet. Talk to me more first.", profile)
+        await update.message.reply_text(msg)
         return
-    status_msg = await update.message.reply_text("🪞 *Reflecting on your journey...*", parse_mode="Markdown")
+    msg = await localize(user_id, "🪞 *Reflecting on your journey...*", profile)
+    status_msg = await update.message.reply_text(msg, parse_mode="Markdown")
     episodes_text = "\n".join([f"- [{ep.get('domain')}] {ep.get('event')} ({ep.get('created_at', '')[:10]})" for ep in reversed(episodes) if not ep.get("event", "").startswith("Daily summary") and not ep.get("event", "").startswith("Weekly summary")]) or "No significant episodes recorded yet."
     
     prompt = f"""You are MYRROR. Generate a profound, psychological reflection for this person.
@@ -307,15 +355,16 @@ INSTRUCTIONS:
 2. Explicitly weave in their 'cognition_style', 'behavioral_patterns', and 'quirks_and_micro_details'. How do these invisible forces drive their recent episodes?
 3. Reflect on their 'psyche_and_motivations' and 'clinical_profile' (MBTI, Enneagram, Big Five) to explain *why* they are exactly where they are right now.
 4. Point out any contradictions between what they say they want and what their behavior shows.
-5. Be brutally objective, practical, and highly analytical. Do not sugarcoat.
-6. Respond in the user's language. Format beautifully with markdown.
+5. Be brutally objective, practical, and highly analytical, but use SIMPLE, ACCESSIBLE language.
+6. CRITICAL: Respond entirely in the user's primary language. Format beautifully with markdown.
 """
     try:
         response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
         await status_msg.edit_text(response.text)
     except Exception as e:
         logger.error(f"Reflect command error: {e}")
-        await status_msg.edit_text("I had trouble generating your reflection. Try again in a moment.")
+        msg_err = await localize(user_id, "I had trouble generating your reflection. Try again in a moment.", profile)
+        await status_msg.edit_text(msg_err)
 
 async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -323,14 +372,17 @@ async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     messages = await asyncio.to_thread(get_messages, user_id, 40)
     episodes = await asyncio.to_thread(get_episodes, user_id, limit=20)
     if not profile and not messages:
-        await update.message.reply_text("Not enough data yet. Keep talking to me.")
+        msg = await localize(user_id, "Not enough data yet. Keep talking to me.", profile)
+        await update.message.reply_text(msg)
         return
-    status_msg = await update.message.reply_text("📅 *Reviewing your week...*", parse_mode="Markdown")
+    msg = await localize(user_id, "📅 *Reviewing your week...*", profile)
+    status_msg = await update.message.reply_text(msg, parse_mode="Markdown")
     summary = await generate_weekly_summary(user_id, profile, messages, episodes)
     if summary:
         await status_msg.edit_text(summary)
     else:
-        await status_msg.edit_text("I had trouble generating your weekly summary. Try again in a moment.")
+        msg_err = await localize(user_id, "I had trouble generating your weekly summary. Try again in a moment.", profile)
+        await status_msg.edit_text(msg_err)
 
 async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -347,17 +399,20 @@ async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     val = int(mood_val)
     category = "low" if val <= 4 else ("mid" if val <= 7 else "high")
     response_texts = {"low": "You clicked low... I'm sorry things are heavy right now. I'm here if you want to vent.", "mid": "Right down the middle. Surviving the day. Anything specific on your mind?", "high": "Glad to see you're doing well! Tell me what's making it a good day."}
-    await query.edit_message_text(text=f"Mood recorded: {mood_val}/10.\n\n{response_texts[category]}")
+    msg = await localize(user_id, f"Mood recorded: {mood_val}/10.\n\n{response_texts[category]}", profile)
+    await query.edit_message_text(text=msg)
 
 async def contract_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     profile = await asyncio.to_thread(get_profile, user_id)
     contracts = profile.get("personal_contracts", None)
     if not contracts:
-        await update.message.reply_text("No personal contracts yet.\n\nTell me something like:\n'Don't let me justify skipping the gym'\nI'll remember and enforce it.")
+        msg = await localize(user_id, "No personal contracts yet.\n\nTell me something like:\n'Don't let me justify skipping the gym'\nI'll remember and enforce it.", profile)
+        await update.message.reply_text(msg)
         return
     lines = ["Your personal contracts:\n"] + [f"• {c}" for c in (contracts if isinstance(contracts, list) else [contracts])]
-    await update.message.reply_text("\n".join(lines))
+    msg = await localize(user_id, "\n".join(lines), profile)
+    await update.message.reply_text(msg)
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -365,25 +420,28 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.to_thread(lambda: supabase.table("messages").delete().eq("user_id", user_id).execute())
     await asyncio.to_thread(lambda: supabase.table("episodes").delete().eq("user_id", user_id).execute())
     await asyncio.to_thread(lambda: supabase.table("people").delete().eq("user_id", user_id).execute())
-    await update.message.reply_text("Profile and history cleared. Starting fresh.")
+    msg = await localize(user_id, "Profile and history cleared. Starting fresh.")
+    await update.message.reply_text(msg)
 
 async def flashback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     episodes = await asyncio.to_thread(get_episodes, user_id, limit=50)
     valid_episodes = [ep for ep in episodes[10:] if not ep.get("event", "").startswith("Daily summary") and not ep.get("event", "").startswith("Weekly summary")]
     if not valid_episodes:
-        await update.message.reply_text("We haven't shared enough history yet for a flashback. Let's make some memories first.")
+        msg = await localize(user_id, "We haven't shared enough history yet for a flashback. Let's make some memories first.")
+        await update.message.reply_text(msg)
         return
     episode = random.choice(valid_episodes)
     event = episode.get("event", "")
     date = episode.get("created_at", "")[:10]
     profile = await asyncio.to_thread(get_profile, user_id)
     cognition = profile.get("cognition_style", "Balanced")
-    prompt = f"The user experienced this event on {date}: '{event}'. Ask a deeply thoughtful, curious question about how they feel about it now, or how it shaped them since then. Keep it to one brief paragraph.\n\nADAPT TO THEIR MIND: Their cognition style is '{cognition}'. Tailor the angle of the question to how their brain processes reality (e.g., logical/framework-based vs emotional/internal)."
+    prompt = f"The user experienced this event on {date}: '{event}'. Ask a deeply thoughtful, curious question about how they feel about it now, or how it shaped them since then. Keep it to one brief paragraph.\n\nADAPT TO THEIR MIND: Their cognition style is '{cognition}'. Tailor the angle of the question to how their brain processes reality (e.g., logical/framework-based vs emotional/internal).\n\nCRITICAL: Respond entirely in the user's primary language."
     await update.message.chat.send_action("typing")
     try:
         response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
         await update.message.reply_text(response.text.strip())
     except Exception as e:
         logger.error(f"Flashback error: {e}")
-        await update.message.reply_text(f"I was just thinking about when you mentioned: '{event}' ({date}). How do you feel about that now?")
+        msg = await localize(user_id, f"I was just thinking about when you mentioned: '{event}' ({date}). How do you feel about that now?", profile)
+        await update.message.reply_text(msg)

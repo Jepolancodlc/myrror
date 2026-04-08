@@ -58,12 +58,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.to_thread(lambda: supabase.table("messages").delete().eq("user_id", user_id).execute())
     welcome_text = (
         "Hello. I am MYRROR.\n\n"
-        "I am not a standard assistant. I am here to be a mirror for your mind, "
-        "to help you track your growth, and to remember what matters to you.\n\n"
-        "You can text me, send me voice notes, images, or documents. "
-        "Over time, I will learn your patterns, hold you to your commitments, and "
-        "support you when things get heavy.\n\n"
-        "Tell me, what brings you here today?"
+        "I am not a standard assistant. I am here to be a mirror for your mind, to help you track your growth, and to remember what matters to you.\n"
+        "You can text me, send me voice notes, images, or documents. Over time, I will learn your patterns and support you.\n\n"
+        "Tell me, what brings you here today?\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Hola. Soy MYRROR.\n\n"
+        "No soy un asistente estándar. Estoy aquí para ser un espejo de tu mente, ayudarte a ver tu crecimiento y recordar lo que te importa.\n"
+        "Puedes escribirme, enviarme audios, imágenes o documentos. Con el tiempo, aprenderé tus patrones y te apoyaré.\n\n"
+        "Dime, ¿qué te trae por aquí hoy?"
     )
     await update.message.reply_text(welcome_text)
 
@@ -130,7 +132,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await context.bot.get_file(photo.file_id)
     file_bytes = await file.download_as_bytearray()
     caption = update.message.caption or "Analyze this image and tell me what you think."
-    status_msg = await update.message.reply_text("👁️ *Analyzing image...*", parse_mode="Markdown")
+    status_msg = await update.message.reply_text("👁️ *Analyzing image... / Analizando imagen...*", parse_mode="Markdown")
     try:
         text = await analyze_image(user_id, file_bytes, caption)
         profile = await asyncio.to_thread(get_profile, user_id)
@@ -143,7 +145,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     await update.message.chat.send_action("typing")
-    status_msg = await update.message.reply_text("🎧 *Listening to your voice...*", parse_mode="Markdown")
+    status_msg = await update.message.reply_text("🎧 *Listening... / Escuchando...*", parse_mode="Markdown")
     voice = update.message.voice
     file = await context.bot.get_file(voice.file_id)
     file_bytes = await file.download_as_bytearray()
@@ -163,7 +165,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mime = document.mime_type or ""
     caption = update.message.caption or "Analyze this file and tell me what you think."
     await update.message.chat.send_action("typing")
-    status_msg = await update.message.reply_text("📄 *Reading document...*", parse_mode="Markdown")
+    status_msg = await update.message.reply_text("📄 *Reading document... / Leyendo documento...*", parse_mode="Markdown")
     file = await context.bot.get_file(document.file_id)
     file_bytes = await file.download_as_bytearray()
     try:

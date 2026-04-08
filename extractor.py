@@ -128,6 +128,7 @@ Sound like a human who was just quietly reflecting and had an "aha!" moment abou
 Start with something like "Wait...", "I was just thinking about our conversation...", or "I just realized something watching your patterns..."
 Point out the shift explicitly but conversationally (e.g., "You've moved from being purely logical to...").
 Show them how much they've grown or changed. Be deep, observant, and supportive.
+Use simple, easy-to-understand language. Avoid clinical psychology terms.
 Do not ask them to reply unless it's a very natural rhetorical question.
 Format cleanly. Respond in the user's language.
 """
@@ -151,10 +152,12 @@ Format cleanly. Respond in the user's language.
 def parse_json_response(text: str):
     try:
         clean = text.strip()
-        if "```json" in clean:
-            clean = clean.split("```json")[1].split("```")
-        elif "```" in clean:
-            clean = clean.split("```").split("```")[0]
+        if clean.startswith("```json"):
+            clean = clean.split("```json", 1)
+        elif clean.startswith("```"):
+            clean = clean.split("```", 1)[1]
+        if clean.endswith("```"):
+            clean = clean.rsplit("```", 1)[0]
         return json.loads(clean.strip())
     except Exception as e:
         logger.error(f"JSON parse error: {e} | Text: {text[:200]}")
@@ -204,6 +207,9 @@ def track_evolution(profile: dict, new_data: dict) -> list:
     evolution = profile.get("evolution", [])[-49:] # Mantener un límite de los últimos 50 registros para evitar explosión de tokens
     now = datetime.now().strftime("%Y-%m-%d")
 
+    source = new_data.get("data_source", "inferred")
+    confidence_level = "high" if source == "explicit" else "medium"
+
     for field in tracked_fields:
         if field not in new_data:
             continue
@@ -222,7 +228,20 @@ def track_evolution(profile: dict, new_data: dict) -> list:
                 changed = True
                 change_note = f"Added: {added}" if added else ""
                 if removed:
-                    change_note += f" | Removed: {removed}"
+                        change_note += f" | Removed: {removed}" if change_note else f"Removed: {removed}"
+            elif isinstance(old_value, dict) and isinstance(new_value, dict):
+                dict_changes = []
+                all_keys = set(old_value.keys()).union(new_value.keys())
+                for k in all_keys:
+                    if k not in old_value:
+                        dict_changes.append(f"Added '{k}': {new_value[k]}")
+                    elif k not in new_value:
+                        dict_changes.append(f"Removed '{k}'")
+                    elif str(old_value[k]) != str(new_value[k]):
+                        dict_changes.append(f"'{k}' changed to '{new_value[k]}'")
+                if dict_changes:
+                    changed = True
+                    change_note = " | ".join(dict_changes)
         else:
             if str(old_value) != str(new_value):
                 changed = True
@@ -234,7 +253,8 @@ def track_evolution(profile: dict, new_data: dict) -> list:
                 "field": field,
                 "from": old_value,
                 "to": new_value,
-                "note": change_note
+                "note": change_note,
+                "confidence": confidence_level
             })
 
     return evolution
@@ -341,16 +361,18 @@ def get_profile_for_context(profile: dict, context: str) -> str:
 # PEOPLE EXTRACTOR
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def extract_people(user_id: str, content: str, response: str):
+async def extract_people(user_id: str, content: str, response: str, profile: dict = None):
     """Extract mentions of important people and save them."""
+    user_name = profile.get("name", "the user") if profile else "the user"
     prompt = f"""You are a people extraction system.
 
 Analyze this conversation and identify any people mentioned by the user.
 
-User: "{content}"
-MYRROR: "{response}"
+User ({user_name}): "{content[:4000]}"
+MYRROR: "{response[:4000]}"
 
-Only extract REAL people explicitly mentioned. Ignore generic references.
+Only extract REAL people explicitly mentioned. 
+CRITICAL: Do NOT extract the user themselves ({user_name}, "I", "me", "j.", "john") and do NOT extract the AI (MYRROR). Only extract OTHER people in the user's life.
 """
     try:
         result = await client.aio.models.generate_content(
@@ -391,8 +413,8 @@ CONTEXT TYPE: {context_type}
 CURRENT PROFILE: {json.dumps(profile, ensure_ascii=False, separators=(',', ':'))}
 
 INTERACTION:
-User: "{content}"
-MYRROR: "{response}"
+User: "{content[:4000]}"
+MYRROR: "{response[:4000]}"
 
 ANALYSIS INSTRUCTIONS (WHAT TO OBSERVE):
 1. Explicit Analysis: Extract direct data like tastes, anecdotes, preferences, routines, and opinions.
@@ -435,7 +457,9 @@ RULES:
         # Limpiar datos nulos de la respuesta del Schema para no borrar info existente
         new_data = {k: v for k, v in new_data.items() if v is not None}
 
+        old_evolution_len = len(profile.get("evolution", []))
         evolution = track_evolution(profile, new_data)
+        new_shifts = evolution[old_evolution_len:]
         source = new_data.pop("data_source", "inferred")
         confidence = update_confidence(profile, new_data, source)
 
@@ -449,7 +473,11 @@ RULES:
         logger.info(f"Profile updated for {user_id} | Context: {context_type}")
         
         # --- AUTONOMY LOGIC ---
-        drastic_shifts = [e for e in evolution if e['field'] in ('clinical_profile', 'cognition_style', 'archetype', 'psyche_and_motivations', 'core_beliefs', 'behavioral_patterns')]
+        drastic_shifts = [
+            s for s in new_shifts 
+            if s['field'] in ('clinical_profile', 'cognition_style', 'archetype', 'psyche_and_motivations', 'core_beliefs', 'behavioral_patterns')
+            and updated.get("confidence", {}).get(s['field'], {}).get("level") == "high"
+        ]
         if drastic_shifts and alert_callback:
             asyncio.create_task(evaluate_and_send_epiphany(user_id, updated, drastic_shifts))
             
@@ -463,15 +491,21 @@ RULES:
 # EPISODE EXTRACTOR
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def extract_episodes_from_content(user_id: str, content: str, response: str):
-    prompt = f"""You are an episode detection system.
+async def extract_episodes_from_content(user_id: str, content: str, response: str, profile: dict = None):
+    user_name = profile.get("name", "the user") if profile else "the user"
+    prompt = f"""You are a high-precision episodic memory system.
 
-Identify significant life moments worth remembering permanently.
+Analyze this interaction and identify if a SIGNIFICANT life event, major realization, or profound shift occurred.
 
-User: "{content}"
-MYRROR: "{response}"
+User ({user_name}): "{content[:4000]}"
+MYRROR: "{response[:4000]}"
 
-Only extract REAL, SIGNIFICANT events. Ignore small talk and tests.
+CRITICAL RULES for Extraction:
+1. DO NOT extract mundane activities (e.g., sleeping, eating, going to work, playing games).
+2. DO NOT extract greetings, small talk, meta-chat, or bot commands (e.g., "analyze this pdf", "hello", "/profile").
+3. DO NOT extract temporary moods or venting, unless it reveals a deep trauma or major life shift.
+4. If there is NO highly significant event to record, you MUST return an empty list: [].
+5. If there is an event, describe it in the third person (e.g., "{user_name} realized they were using relationships to avoid loneliness").
 """
     try:
         result = await client.aio.models.generate_content(
@@ -550,9 +584,9 @@ INSTRUCTIONS:
    - One focus for next week
 2. ADAPT TO THEIR MIND: Structure this summary matching their 'cognition_style'. If they are logical, make it systematic and factual. If emotional, focus on internal shifts and resonance.
 3. PSYCHOLOGICAL DEPTH: Explicitly point out how their 'behavioral_patterns', 'quirks_and_micro_details', or 'clinical_profile' drove this week's outcomes.
-4. Be specific, honest, direct. Reference real things.
+4. Be specific, honest, direct, but use SIMPLE, ACCESSIBLE language. No overly academic jargon.
 5. 3-5 sentences max per point.
-6. Respond in the user's language.
+6. CRITICAL: Respond entirely in the user's language (e.g., Spanish).
 """
     try:
         result = await client.aio.models.generate_content(
@@ -562,14 +596,12 @@ INSTRUCTIONS:
         summary = result.text.strip()
         if not summary:
             return ""
-        if not summary:
-            return
         
         embedding = None
         try:
             emb_res = await client.aio.models.embed_content(
                 model="text-embedding-004",
-                contents=f"Weekly summary: {summary[:200]}"
+                contents=f"Weekly summary: {summary[:1000]}"
             )
             if emb_res.embeddings:
                 embedding = emb_res.embeddings[0].values
@@ -579,7 +611,7 @@ INSTRUCTIONS:
         await asyncio.to_thread(
             save_episode,
             user_id=user_id,
-            event=f"Weekly summary: {summary[:200]}",
+            event=f"Weekly summary: {summary}",
             domain="personal",
             impact="high",
             embedding=embedding
@@ -691,8 +723,8 @@ async def run_post_analysis_tasks(user_id: str, context_type: str, content: str,
         await extract_and_save_profile(user_id, context_type, content, response, profile)
         
         await asyncio.gather(
-            extract_episodes_from_content(user_id, content, response),
-            extract_people(user_id, content, response)
+            extract_episodes_from_content(user_id, content, response, profile),
+            extract_people(user_id, content, response, profile)
         )
     except Exception as e:
         logger.error(f"Post-analysis tasks error for {user_id}: {e}", exc_info=True)

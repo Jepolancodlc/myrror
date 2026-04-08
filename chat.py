@@ -117,7 +117,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         try:
             m = float(mood)
             if m <= 4:
-                ctx += "\n\nCURRENT STANCE (BROTHER/FRIEND): The user is going through a rough patch. Be highly empathetic, protective, and gentle. Offer a safe space. Do NOT push them hard or demand extreme accountability today."
+                ctx += "\n\nCURRENT STANCE (BROTHER/FRIEND): The user is going through a rough patch and feeling low. OVERRIDE ANY 'TOUGH LOVE' DIRECTIVES. Be highly empathetic, protective, and gentle. Validate their pain first. Do NOT push them hard, do NOT lecture them about productivity, and do NOT demand extreme accountability today. Just be a safe space."
             elif m >= 7:
                 ctx += "\n\nCURRENT STANCE (COACH/GUIDE): The user is in a strong state. Hold them to their absolute highest standard. Challenge their excuses, push them to execute their goals, and do not accept mediocrity. Be tough but fair."
             else:
@@ -232,9 +232,10 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
     # Solo buscamos en la memoria si el mensaje tiene sustancia (evita buscar recuerdos para "sí", "ok", "jaja")
     if len(content.split()) > 3 or len(content) > 15:
         try:
+            embed_text = content if len(content) <= 8000 else content[:8000]
             emb_res = await client.aio.models.embed_content(
                 model="text-embedding-004",
-                contents=content
+                contents=embed_text
             )
             if emb_res.embeddings:
                 query_embedding = emb_res.embeddings[0].values
@@ -270,7 +271,8 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         ctx += "\n\nRECENT HISTORY:\n"
         for msg in recent_history:
             role = "User" if msg["role"] == "user" else "MYRROR"
-            ctx += f"{role}: {msg['content']}\n"
+            safe_content = msg['content'] if len(msg['content']) <= 2500 else msg['content'][:2500] + "... [truncated]"
+            ctx += f"{role}: {safe_content}\n"
 
     ctx += f"\nUser: {content}\nMYRROR:"
 

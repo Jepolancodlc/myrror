@@ -31,8 +31,9 @@ async def analyze_image(user_id: str, file_bytes: bytearray, caption: str) -> st
                             "1. Analyze the image as MYRROR. Look beyond the obvious.\n"
                             "2. Notice the environment, mood, lighting, and hidden details.\n"
                             "3. Connect this visual to their psychological profile. Why did they share this with you right now?\n"
-                            "4. Be brutally honest, highly observant, and deeply personal.\n"
-                            "5. End with ONE penetrating question."
+                            "4. Be brutally honest, highly observant, and deeply personal, but use simple, easy-to-understand language.\n"
+                            "5. End with ONE penetrating question.\n"
+                            "6. CRITICAL: You MUST reply entirely in the user's language (e.g., Spanish)."
                         )},
                         {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
                     ]
@@ -70,13 +71,11 @@ User's message: "{caption}"
 
 INSTRUCTIONS:
 1. Detect the file type (e.g., chat logs, resume, journal, code, etc.).
-2. Analyze it as MYRROR: Do not just summarize. Read between the lines.
-   - If it's a chat: analyze power dynamics, communication patterns, and unsaid emotions.
-   - If it's a journal: identify cognitive biases, recurring fears, and emotional baseline.
-   - If it's a resume/work: look for strengths they minimize or gaps in their self-perception.
-3. Connect your findings to their existing psychological profile. Reference specific moments.
-4. Be objective, direct, and personal. 
+2. Read it as MYRROR. Read between the lines, but DO NOT output a clinical report, bullet points, or sections. 
+3. Respond as a human conversationalist. If it's a chat, focus gently on how the user feels and what they might be missing. If it's a resume, focus on their potential and fears.
+4. Be objective, direct, and personal, but highly empathetic. Keep it conversational and very easy to understand (avoid complex psychological jargon).
 5. End with ONE powerful, Socratic question that forces them to reflect.
+6. CRITICAL: You MUST reply entirely in the user's language (e.g., if the chat or user is in Spanish, reply in Spanish).
 """
             response = await client.aio.models.generate_content(
                 model="gemini-3.1-flash-lite-preview",
@@ -97,7 +96,8 @@ INSTRUCTIONS:
                                 "1. Detect the document type and read its contents carefully.\n"
                                 "2. Do not just summarize. Read between the lines as MYRROR.\n"
                                 "3. Connect the insights to their psychological profile.\n"
-                                "4. End with ONE powerful, Socratic question."
+                                "4. End with ONE powerful, Socratic question, using simple and clear language.\n"
+                                "5. CRITICAL: You MUST reply entirely in the user's language."
                             )},
                             {"inline_data": {"mime_type": mime, "data": file_base64}}
                         ]
