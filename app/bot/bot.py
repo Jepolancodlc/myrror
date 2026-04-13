@@ -1,3 +1,4 @@
+"""Telegram Bot Entry Point: Initializes the bot, registers command handlers, and manages message debouncing."""
 import logging
 import os
 import time
@@ -9,16 +10,16 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from dotenv import load_dotenv
-from database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile
-from chat import get_response
-from analyzer import analyze_image, analyze_document, analyze_voice
-from extractor import generate_daily_summary, generate_weekly_summary, run_post_analysis_tasks, set_alert_callback
-from bot_commands import (localize, get_mood_keyboard, mood_command, sos_command, export_command, help_command, profile_command, evolution_command, episodes_command, people_command, reflect_command, week_command, mood_callback, contract_command, reset_command, flashback_command, dossier_command, setcompass_command)
-from bot_jobs import proactive_check_job, daily_maintenance_job
+from app.db.database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile
+from app.services.chat import get_response
+from app.services.analyzer import analyze_image, analyze_document, analyze_voice
+from app.services.extractor import generate_daily_summary, generate_weekly_summary, run_post_analysis_tasks, set_alert_callback
+from app.bot.bot_commands import (localize, get_mood_keyboard, mood_command, sos_command, export_command, help_command, profile_command, evolution_command, episodes_command, people_command, reflect_command, week_command, mood_callback, contract_command, reset_command, flashback_command, dossier_command, setcompass_command)
+from app.bot.bot_jobs import proactive_check_job, daily_maintenance_job
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, Field
 from datetime import datetime
+from app.models.schemas import QuizSchema
 
 load_dotenv()
 
@@ -34,10 +35,6 @@ telegram_app = None
 
 _bg_tasks = set()
 
-
-class QuizSchema(BaseModel):
-    question: str
-    options: list[str] = Field(description="Exactly 4 options")
 
 async def send_proactive_alert(user_id: str, text: str):
     global telegram_app
@@ -113,7 +110,7 @@ async def quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(query.from_user.id)
     idx = int(query.data.split("_")[1])
     
-    # MEMORY LEAK FIX: Pop to free up RAM after user answers
+    # Memory Leak Fix: Pop to free up RAM after user answers
     options = user_quiz_options.pop(user_id, [])
     chosen = options[idx] if idx < len(options) else "An unknown option"
     
@@ -324,7 +321,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_new_session = user_sessions.pop(user_id, False)
             combined_content = "\n".join(user_message_buffers[user_id])
             is_burst = len(user_message_buffers[user_id]) > 2
-            user_message_buffers[user_id] = [] # Limpiar el búfer
+            user_message_buffers[user_id] = [] # Clear the buffer for the next round of messages
             
             final_content = combined_content
             if is_burst:

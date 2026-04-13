@@ -1,12 +1,13 @@
+"""Main Chat Service: Orchestrates AI responses, context assembly, and RAG memory injection."""
 import logging
 import os
 import asyncio
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from prompt import SYSTEM_PROMPT
-from database import get_profile, get_messages, save_message, get_all_people, search_similar_episodes
-from extractor import get_profile_for_context, compress_history, run_post_analysis_tasks
+from app.core.prompt import SYSTEM_PROMPT
+from app.db.database import get_profile, get_messages, save_message, get_all_people, search_similar_episodes
+from app.services.extractor import get_profile_for_context, compress_history, run_post_analysis_tasks
 import random
 from datetime import datetime
 
@@ -15,7 +16,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Registro de tareas en segundo plano para evitar su destrucción por el GC
+# Task registry: Holds strong references so Python's Garbage Collector doesn't kill async tasks mid-execution.
 background_tasks = set()
 
 def detect_crisis(content: str, history: list, profile: dict) -> bool:
@@ -97,7 +98,7 @@ One sentence only.
 async def get_response(user_id: str, content: str, new_session: bool = False) -> str:
     profile = await asyncio.to_thread(get_profile, user_id)
     
-    # Obtener un contexto más amplio para compresión (30 mensajes)
+    # Retrieve a broader context window (30 messages) for potential history compression
     history = await asyncio.to_thread(get_messages, user_id, 30)
     recent_history = history[-10:] if history else []
     compressed_context = await compress_history(user_id, history, profile)
@@ -337,7 +338,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         ctx += "\nDo not just give the answers or lecture. Guide them to their own epiphanies. Use SOCRATIC SILENCE when they are venting, ask ONE penetrating question when they are stuck, or use VERBATIM MIRRORING to show them their own contradictions. NEVER force a question if a supportive statement or silence is more natural."
 
     # Semantic RAG Memory Engine
-    # Solo buscamos en la memoria si el mensaje tiene sustancia (evita buscar recuerdos para "sí", "ok", "jaja")
+    # Semantic RAG Trigger: Only run costly vector searches if the message has substance (ignores "yes", "ok").
     if len(content.split()) > 3 or len(content) > 15 or conv_ctx:
         try:
             # HYPER-PRECISE RAG: Combine the high-level conversation summary with the raw message
@@ -382,7 +383,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         ])
         ctx += f"\n\nPEOPLE IN THEIR LIFE:\n{people_summary}"
 
-    # Inyectar el historial comprimido si existe
+    # Inject the compressed older history summary if it exists
     if compressed_context:
         ctx += f"\n\nCOMPRESSED OLDER CONTEXT:\n{compressed_context}"
 
@@ -399,8 +400,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
 
     ctx += f"\nUser: {content}\nMYRROR:"
 
-    # 1. Guardar primero el mensaje del usuario para garantizar el orden cronológico
-    # sin importar cuánto tarde la API de Gemini en responder.
+    # Safety First: Save user message immediately to guarantee chronological order regardless of Gemini API latency.
     try:
         await asyncio.to_thread(save_message, user_id, "user", content)
     except Exception as e:
@@ -450,7 +450,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         return "I'm having a hard time processing my thoughts right now. Give me a moment."
 
     try:
-        # 2. Guardar la respuesta de la IA después
+        # Save the AI's generated response to the DB afterward
         await asyncio.to_thread(save_message, user_id, "assistant", text)
     except Exception as e:
         logger.error(f"Assistant message save error for {user_id}: {e}", exc_info=True)

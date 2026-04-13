@@ -18,15 +18,17 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 else:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Diccionario global para mantener los locks por usuario y evitar Race Conditions
+# Global asyncio.Lock registry to prevent Race Conditions during rapid sequential messages.
 _user_locks = {}
 
 def get_user_lock(user_id: str) -> asyncio.Lock:
+    """Returns a user-specific asyncio.Lock for thread-safe updates, preventing Race Conditions."""
     if user_id not in _user_locks:
         _user_locks[user_id] = asyncio.Lock()
     return _user_locks[user_id]
 
 def get_profile(user_id: str) -> dict:
+    """Retrieves user profile JSON. Note: Supabase is synchronous; wrap in `asyncio.to_thread` to avoid blocking FastAPI."""
     try:
         if not supabase: return {}
         result = supabase.table("profile").select("*").eq("user_id", user_id).execute()
@@ -38,6 +40,7 @@ def get_profile(user_id: str) -> dict:
         return {}
 
 def save_profile(user_id: str, data: dict):
+    """Creates or updates the complete profile of a user in the database."""
     try:
         if not supabase: return
         existing = supabase.table("profile").select("*").eq("user_id", user_id).execute()
@@ -49,7 +52,7 @@ def save_profile(user_id: str, data: dict):
         logger.error(f"save_profile error for {user_id}: {e}", exc_info=True)
 
 def get_all_profiles() -> list:
-    """Fetch all profiles to check for inactive users or scheduled events."""
+    """Fetches ALL registered user profiles. Used by Background Jobs to identify inactive users or events."""
     try:
         if not supabase: return []
         result = supabase.table("profile").select("user_id", "data").execute()
@@ -59,9 +62,10 @@ def get_all_profiles() -> list:
         return []
 
 def get_messages(user_id: str, limit: int = 10) -> list:
+    """Retrieves recent message history for short-term conversational context."""
     try:
         if not supabase: return []
-        # Ordenar descendente para obtener los últimos, y luego revertir para mantener el orden cronológico
+        # Sort descending to grab recent items, then reverse to restore chronological order
         result = supabase.table("messages").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(limit).execute()
         return list(reversed(result.data)) if result.data else []
     except Exception as e:
@@ -69,6 +73,7 @@ def get_messages(user_id: str, limit: int = 10) -> list:
         return []
 
 def get_all_messages(user_id: str) -> list:
+    """Retrieves the complete chronological conversation history for a specific user."""
     try:
         if not supabase: return []
         result = supabase.table("messages").select("*").eq("user_id", user_id).order("created_at").execute()
@@ -78,6 +83,7 @@ def get_all_messages(user_id: str) -> list:
         return []
 
 def save_message(user_id: str, role: str, content: str):
+    """Saves an individual message into the database (Chat History)."""
     try:
         if not supabase: return
         supabase.table("messages").insert({
@@ -89,6 +95,7 @@ def save_message(user_id: str, role: str, content: str):
         logger.error(f"save_message error for {user_id}: {e}", exc_info=True)
 
 def save_episode(user_id: str, event: str, domain: str = None, impact: str = None, embedding: list = None):
+    """Saves an autobiographical event ("Episode") and its mathematical vector into the Semantic RAG memory."""
     try:
         if not supabase: return
         data = {
@@ -99,13 +106,14 @@ def save_episode(user_id: str, event: str, domain: str = None, impact: str = Non
             "verified": False
         }
         if embedding:
-            # Forzar el formato string para pgvector: "[0.1,0.2,...]"
+            # Coerce list into string format required by PostgreSQL pgvector: "[0.1, 0.2, ...]"
             data["embedding"] = f"[{','.join(str(x) for x in embedding)}]"
         supabase.table("episodes").insert(data).execute()
     except Exception as e:
         logger.error(f"save_episode error for {user_id}: {e}", exc_info=True)
 
 def get_episodes(user_id: str, limit: int = 10) -> list:
+    """Retrieves the most recent biographical episodes chronologically (used for /episodes and Weekly Summary)."""
     try:
         if not supabase: return []
         result = supabase.table("episodes").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(limit).execute()
@@ -115,14 +123,15 @@ def get_episodes(user_id: str, limit: int = 10) -> list:
         return []
 
 def search_similar_episodes(user_id: str, query_embedding: list, limit: int = 3) -> list:
+    """Semantic RAG Retrieval: Calls a Supabase RPC to find past episodes mathematically related via Cosine Similarity."""
     try:
         if not supabase: return []
         response = supabase.rpc(
             "match_episodes",
             {
-                # Forzar el formato string para la llamada RPC
+                # Force string array format for pgvector RPC
                 "query_embedding": f"[{','.join(str(x) for x in query_embedding)}]",
-                "match_threshold": 0.6, # Solo recuerdos relevantes (60% de similitud o más)
+                "match_threshold": 0.6, # Return memories with >= 60% relevance
                 "match_count": limit,
                 "p_user_id": user_id
             }
@@ -133,6 +142,7 @@ def search_similar_episodes(user_id: str, query_embedding: list, limit: int = 3)
         return []
 
 def get_person(user_id: str, name: str) -> dict:
+    """Searches for a specific person in the database by name (case-insensitive)."""
     try:
         if not supabase: return {}
         result = supabase.table("people").select("*").eq("user_id", user_id).ilike("name", f"%{name}%").execute()
@@ -144,6 +154,7 @@ def get_person(user_id: str, name: str) -> dict:
         return {}
 
 def get_all_people(user_id: str) -> list:
+    """Fetches the list of all registered people in the user's life."""
     try:
         if not supabase: return []
         result = supabase.table("people").select("*").eq("user_id", user_id).execute()
@@ -153,6 +164,7 @@ def get_all_people(user_id: str) -> list:
         return []
 
 def get_null_episodes(user_id: str) -> list:
+    """Finds episodes missing their semantic vector (embedding=null) for auto-healing background jobs."""
     try:
         if not supabase: return []
         result = supabase.table("episodes").select("*").eq("user_id", user_id).is_("embedding", "null").execute()
@@ -162,6 +174,7 @@ def get_null_episodes(user_id: str) -> list:
         return []
 
 def update_episode_embedding(episode_id: str, embedding: list):
+    """Updates the semantic vector (embedding) of an existing episode (auto-maintenance)."""
     try:
         if not supabase: return
         emb_str = f"[{','.join(str(x) for x in embedding)}]"
@@ -170,6 +183,7 @@ def update_episode_embedding(episode_id: str, embedding: list):
         logger.error(f"update_episode_embedding error for {episode_id}: {e}", exc_info=True)
 
 def save_person(user_id: str, name: str, relationship: str = None, notes: dict = {}):
+    """Saves or updates a person in the user's life, merging previous notes with new deductions."""
     try:
         if not supabase: return
         existing = supabase.table("people").select("*").eq("user_id", user_id).ilike("name", name).execute()

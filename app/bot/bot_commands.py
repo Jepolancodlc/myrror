@@ -1,4 +1,4 @@
-"""Manejadores de comandos (/start, /help, /profile, etc.) para el Bot de Telegram."""
+"""Telegram Command Handlers: Processes all explicit bot commands (/start, /help, /profile, etc.)."""
 import logging
 import os
 import asyncio
@@ -7,7 +7,7 @@ import random
 import math
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile, get_user_lock
+from app.db.database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile, get_user_lock
 from app.services.extractor import track_evolution, generate_weekly_summary
 from google import genai
 from datetime import datetime

@@ -1,3 +1,4 @@
+"""Extraction Service: Uses Gemini to autonomously deduce psychological profiles, episodes, and key people from conversations."""
 import logging
 import json
 import os
@@ -7,10 +8,9 @@ import random
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from database import get_profile, save_profile, save_episode, save_person, get_all_people, save_message, get_episodes, get_user_lock, get_messages
+from app.db.database import get_profile, save_profile, save_episode, save_person, get_all_people, save_message, get_episodes, get_user_lock, get_messages
+from app.models.schemas import PersonSchema, ProfileSchema, EpisodeSchema
 from datetime import datetime
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
 
 load_dotenv()
 
@@ -27,94 +27,13 @@ def set_alert_callback(cb):
 _bg_tasks = set()
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PYDANTIC SCHEMAS (STRUCTURED OUTPUTS)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-class PersonNotesSchema(BaseModel):
-    description: Optional[str] = Field(default=None, description="brief description")
-    context: Optional[str] = Field(default=None, description="how they came up in conversation")
-    power_dynamic: Optional[str] = Field(default=None, description="e.g., user seeks their approval, user feels intimidated, codependent, equal, etc.")
-
-class PersonSchema(BaseModel):
-    name: str
-    relationship: Optional[str] = Field(default=None)
-    notes: Optional[PersonNotesSchema] = Field(default=None)
-
-class ClinicalProfileSchema(BaseModel):
-    big_five: Optional[Dict[str, int]] = Field(default=None, description="Dict with O, C, E, A, N integer scores 1-10")
-    enneagram: Optional[str] = Field(default=None)
-    mbti: Optional[str] = Field(default=None, description="MBTI personality type (e.g., INTJ, ENFP)")
-    archetype: Optional[str] = Field(default=None)
-
-class EventItemSchema(BaseModel):
-    event: str
-    timeframe: str
-
-class ProfileSchema(BaseModel):
-    name: Optional[str] = Field(default=None)
-    language: Optional[str] = Field(default=None, description="The primary language the user writes in (e.g. 'Spanish', 'English', 'French')")
-    age: Optional[int] = Field(default=None)
-    location: Optional[str] = Field(default=None)
-    job: Optional[str] = Field(default=None)
-    life_compass: Optional[str] = Field(default=None)
-    current_mood_score: Optional[int] = Field(default=None)
-    myrror_strategy: Optional[str] = Field(default=None, description="your master plan for guiding this user")
-    upcoming_events: Optional[List[EventItemSchema]] = Field(default=None)
-    unresolved_threads: Optional[List[str]] = Field(default=None, description="pending topics to follow up on")
-    goals: Optional[List[str]] = Field(default=None)
-    fears: Optional[List[str]] = Field(default=None)
-    strengths: Optional[List[str]] = Field(default=None)
-    weaknesses: Optional[List[str]] = Field(default=None)
-    personality_traits: Optional[List[str]] = Field(default=None)
-    emotional_state: Optional[str] = Field(default=None)
-    emotional_patterns: Optional[List[str]] = Field(default=None)
-    media_and_tastes: Optional[List[str]] = Field(default=None, description="Books, music, movies, hobbies, or art they consume")
-    avoidance_patterns: Optional[List[str]] = Field(default=None, description="Topics they actively dodge or how they deflect hard questions")
-    emotional_volatility: Optional[str] = Field(default=None, description="Assessment of their emotional stability (e.g., stable, highly volatile, numbed, erratic)")
-    communication_style: Optional[str] = Field(default=None)
-    relationship_patterns: Optional[List[str]] = Field(default=None)
-    state_of_mind_anomalies: Optional[List[str]] = Field(default=None, description="Instances of altered states: sleep deprivation, intoxication, manic bursts, etc.")
-    core_values: Optional[List[str]] = Field(default=None)
-    humor_style: Optional[str] = Field(default=None)
-    decision_making: Optional[str] = Field(default=None)
-    self_perception: Optional[str] = Field(default=None)
-    life_situations: Optional[List[str]] = Field(default=None)
-    skills: Optional[List[str]] = Field(default=None)
-    learning: Optional[List[str]] = Field(default=None)
-    tech_level: Optional[str] = Field(default=None)
-    cultural_background: Optional[str] = Field(default=None)
-    preferred_tone: Optional[str] = Field(default=None)
-    failed_advice: Optional[List[str]] = Field(default=None)
-    detected_patterns: Optional[List[str]] = Field(default=None)
-    contradictions: Optional[List[str]] = Field(default=None)
-    personal_contracts: Optional[List[str]] = Field(default=None)
-    insights_from_files: Optional[List[str]] = Field(default=None)
-    growth_areas: Optional[List[str]] = Field(default=None)
-    core_beliefs: Optional[List[str]] = Field(default=None)
-    cognitive_biases: Optional[List[str]] = Field(default=None)
-    data_source: Optional[str] = Field(default="inferred", description="explicit|inferred")
-    unspoken_fears: Optional[List[str]] = Field(default=None)
-    unmet_needs: Optional[List[str]] = Field(default=None)
-    shadow_traits: Optional[List[str]] = Field(default=None)
-    interaction_manual: Optional[List[str]] = Field(default=None)
-    attachment_style: Optional[str] = Field(default=None)
-    clinical_profile: Optional[ClinicalProfileSchema] = Field(default=None)
-    behavioral_patterns: Optional[List[str]] = Field(default=None, description="Habits, frequent moods, and behavioral tendencies")
-    quirks_and_micro_details: Optional[List[str]] = Field(default=None, description="Typo patterns, ignored topics, recurring complaints, minor quirks")
-    cognition_style: Optional[str] = Field(default=None, description="How they process information: logical, emotional, impulsive, reflective, etc.")
-    psyche_and_motivations: Optional[str] = Field(default=None, description="Detailed analysis of their psyche and underlying motivations")
-    unrealized_truths: Optional[List[str]] = Field(default=None, description="objective facts they haven't realized")
-
-class EpisodeSchema(BaseModel):
-    event: str
-    domain: Optional[str] = Field(default=None, description="tech|work|personal|health|finance|relationships|learning|emotional")
-    impact: Optional[str] = Field(default=None, description="high|medium|low")
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # EPIPHANY ENGINE (AUTONOMOUS INSIGHTS)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def evaluate_and_send_epiphany(user_id: str, profile: dict, shifts: list):
+    """
+    Evaluates drastic psychological shifts in the background and triggers an unprompted 'epiphany' message. Uses dynamic cooldowns to prevent spam.
+    """
     # DYNAMIC THROTTLE: Adapt cooldown based on conversation frequency
     total_convs = profile.get("total_conversations", 1)
     
@@ -188,6 +107,9 @@ Format cleanly. Respond in {language}.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def parse_json_response(text: str):
+    """
+    Sanitizes markdown blocks (e.g., ```json) in Gemini responses and safely parses them into a dict.
+    """
     try:
         clean = text.strip()
         if clean.startswith("```json"):
@@ -202,6 +124,9 @@ def parse_json_response(text: str):
         return None
 
 def deep_merge(base: dict, updates: dict) -> dict:
+    """
+    Deep merges new AI data into the profile, respecting 'fluid' lists (replaced entirely) and additive lists (appended).
+    """
     result = copy.deepcopy(base)
     
     # Lists that should represent the CURRENT state (allowing the user to evolve and discard old traits)
@@ -246,7 +171,7 @@ def track_evolution(profile: dict, new_data: dict) -> list:
         "quirks_and_micro_details", "cognition_style", "psyche_and_motivations",
         "avoidance_patterns"
     ]
-    evolution = profile.get("evolution", [])[-49:] # Mantener un límite de los últimos 50 registros para evitar explosión de tokens
+    evolution = profile.get("evolution", [])[-49:] # Token Optimization: Cap the evolution log at the last 50 records to prevent token explosion over time
     now = datetime.now().strftime("%Y-%m-%d")
 
     source = new_data.get("data_source", "inferred")
@@ -407,7 +332,9 @@ def get_profile_for_context(profile: dict, context: str) -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def extract_people(user_id: str, context_type: str, content: str, response: str, profile: dict = None):
-    """Extract mentions of important people and save them."""
+    """
+    Extracts mentions of key people in the user's life, deducing power dynamics and relational context.
+    """
     user_name = profile.get("name", "the user") if profile else "the user"
     prompt = f"""You are a people extraction system.
 
@@ -456,6 +383,9 @@ CRITICAL RULES:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def extract_and_save_profile(user_id: str, context_type: str, content: str, response: str, profile: dict) -> dict:
+    """
+    Core Extraction Engine: Updates the user's 'Psychological Dossier' based on implicit/explicit behavior. Uses Locks to prevent Race Conditions.
+    """
     prompt = f"""You are the most advanced profile extraction system ever built.
 
 CONTEXT TYPE: {context_type}
@@ -508,7 +438,7 @@ RULES:
         if not new_data:
             return profile
 
-        # Limpiar datos nulos de la respuesta del Schema para no borrar info existente
+        # Schema Safety: Strip out null values from Pydantic response to avoid overwriting data with empty fields
         new_data = {k: v for k, v in new_data.items() if v is not None}
 
         old_evolution_len = len(profile.get("evolution", []))
@@ -517,7 +447,7 @@ RULES:
         source = new_data.pop("data_source", "inferred")
         confidence = update_confidence(profile, new_data, source)
 
-        # MUTEX LOCK: Previene que otra tarea lea/modifique el perfil simultáneamente
+        # MUTEX LOCK: Enforces thread safety, preventing concurrent profile modifications and data corruption.
         async with get_user_lock(user_id):
             current_db_profile = await asyncio.to_thread(get_profile, user_id)
             updated = deep_merge(current_db_profile, new_data)
@@ -592,7 +522,7 @@ CRITICAL RULES for Extraction:
             if episode.get("event"):
                 embedding = None
                 try:
-                    # Generamos el vector de memoria usando Gemini
+                    # Generate the semantic memory vector (embedding) using Gemini's embedding model
                     emb_res = await client.aio.models.embed_content(
                         model="text-embedding-004",
                         contents=episode["event"]

@@ -1,11 +1,11 @@
-"""Tareas programadas en segundo plano (Cron Jobs) para el Bot de Telegram."""
+"""Scheduled Background Tasks (Cron Jobs) for the Telegram Bot ecosystem."""
 import logging
 import asyncio
 import random
 import os
 from datetime import datetime
 from google import genai
-from database import get_all_profiles, get_null_episodes, update_episode_embedding, supabase, save_message, get_user_lock, get_profile, save_profile
+from app.db.database import get_all_profiles, get_null_episodes, update_episode_embedding, supabase, save_message, get_user_lock, get_profile, save_profile
 from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)

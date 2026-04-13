@@ -6,10 +6,10 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
-from chat import get_response
-from bot import start_telegram_bot, stop_telegram_bot
-from keepalive import keep_alive
-from database import get_profile
+from app.services.chat import get_response
+from app.bot.bot import start_telegram_bot, stop_telegram_bot
+from app.core.keepalive import keep_alive
+from app.db.database import get_profile
 from contextlib import asynccontextmanager
 
 load_dotenv()
@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Configuración CORS para permitir conexiones futuras desde un Dashboard o Web App
+# CORS Configuration: Enables secure cross-origin requests for future Dashboard or Web App integrations.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
