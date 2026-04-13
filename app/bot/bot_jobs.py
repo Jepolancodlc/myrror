@@ -95,7 +95,7 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.to_thread(save_message, user_id, "assistant", f"[Proactive Check-in] {text}")
                 
                 data["last_conversation"] = now.strftime("%Y-%m-%d %H:%M")
-                await asyncio.to_thread(lambda: supabase.table("profile").update({"data": data}).eq("user_id", user_id).execute())
+                await asyncio.to_thread(save_profile, user_id, data)
         except Exception as e:
             logger.error(f"Proactive job error for {user_id}: {e}")
 

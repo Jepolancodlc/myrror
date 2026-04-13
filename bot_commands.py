@@ -7,7 +7,7 @@ import random
 import math
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile, get_user_lock
+from app.db.database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile, get_user_lock, delete_all_user_data
 from app.services.extractor import track_evolution, generate_weekly_summary
 from google import genai
 from datetime import datetime
@@ -72,7 +72,7 @@ TEXT TO TRANSLATE:
 async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     profile = await asyncio.to_thread(get_profile, user_id)
-    evolution = profile.get("evolution", [])
+    evolution = profile.get("evolution") or []
 
     mood_data = [e for e in evolution if e.get("field") == "current_mood_score"]
     if len(mood_data) < 2:
@@ -86,8 +86,13 @@ async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import matplotlib.pyplot as plt
         import io
         
-        dates = [e["date"][5:] for e in mood_data[-14:]]
-        scores = [float(str(e["to"]).replace(',', '.')) for e in mood_data[-14:] if str(e["to"]).replace('.', '', 1).isdigit()]
+        dates = []
+        scores = []
+        for e in mood_data[-14:]:
+            val_str = str(e.get("to", "")).replace(',', '.')
+            if val_str.replace('.', '', 1).isdigit():
+                dates.append(e.get("date", "")[5:])
+                scores.append(float(val_str))
 
         fig = plt.figure(figsize=(8, 4))
         ax = fig.add_subplot(111)
@@ -190,7 +195,8 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await localize(user_id, "\n".join(lines), profile)
     await update.message.reply_text(msg)
     
-    big_five = profile.get("clinical_profile", {}).get("big_five")
+    clin = profile.get("clinical_profile") or {}
+    big_five = clin.get("big_five")
     if isinstance(big_five, dict) and len(big_five) >= 5:
         def _generate_radar_chart(bf):
             import matplotlib
@@ -307,7 +313,7 @@ async def setcompass_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def evolution_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     profile = await asyncio.to_thread(get_profile, user_id)
-    evolution = profile.get("evolution", [])
+    evolution = profile.get("evolution") or []
     if not evolution:
         msg = await localize(user_id, "No changes tracked yet. Keep talking to me.", profile)
         await update.message.reply_text(msg)
@@ -467,10 +473,7 @@ async def contract_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    await asyncio.to_thread(lambda: supabase.table("profile").delete().eq("user_id", user_id).execute())
-    await asyncio.to_thread(lambda: supabase.table("messages").delete().eq("user_id", user_id).execute())
-    await asyncio.to_thread(lambda: supabase.table("episodes").delete().eq("user_id", user_id).execute())
-    await asyncio.to_thread(lambda: supabase.table("people").delete().eq("user_id", user_id).execute())
+    await asyncio.to_thread(delete_all_user_data, user_id)
     msg = await localize(user_id, "Profile and history cleared. Starting fresh.")
     await update.message.reply_text(msg)
 

@@ -171,7 +171,7 @@ def track_evolution(profile: dict, new_data: dict) -> list:
         "quirks_and_micro_details", "cognition_style", "psyche_and_motivations",
         "avoidance_patterns"
     ]
-    evolution = profile.get("evolution", [])[-49:] # Token Optimization: Cap the evolution log at the last 50 records to prevent token explosion over time
+    evolution = (profile.get("evolution") or [])[-49:] # Token Optimization: Cap the evolution log at the last 50 records to prevent token explosion over time
     now = datetime.now().strftime("%Y-%m-%d")
 
     source = new_data.get("data_source", "inferred")
@@ -242,7 +242,12 @@ def update_confidence(profile: dict, new_data: dict, source: str) -> dict:
 
     return confidence_map
 
-def get_profile_for_context(profile: dict, context: str) -> str:
+def get_profile_for_context(profile: dict, context_text: str = "", active_domains: list = None) -> str:
+    """
+    Builds a JSON string of the user's profile tailored to the current conversation.
+    Uses semantic `active_domains` to load only the psychological traits relevant to the topic,
+    drastically saving tokens and preventing AI distraction.
+    """
     layer1 = {
         "name": profile.get("name"),
         "language": profile.get("language"),
@@ -274,28 +279,30 @@ def get_profile_for_context(profile: dict, context: str) -> str:
         "avoidance_patterns": profile.get("avoidance_patterns"),
     }
 
-    context_lower = context.lower()
     layer2 = {}
 
-    relationship_keywords = ["relationship", "girl", "boy", "love", "dating", "miss", "heart", "ex", "crush", "teun"]
-    work_keywords = ["work", "job", "code", "tech", "myrror", "python", "programming", "career", "factory", "fábrica"]
-    emotional_keywords = ["sad", "depressed", "anxious", "stress", "angry", "lonely", "overwhelmed", "tired"]
-    growth_keywords = ["improve", "learn", "better", "change", "grow", "habit", "study", "progress"]
-    identity_keywords = ["who am i", "quién soy", "what do you know", "my profile", "about me", "que sabes de mi"]
+    # Fallback heuristic if no semantic router domains are provided (e.g. from analyzer.py)
+    if active_domains is None:
+        active_domains = []
+        context_lower = (context_text or "").lower()
+        if any(w in context_lower for w in ["who am i", "about me"]): active_domains.append("identity")
+        if any(w in context_lower for w in ["relationship", "love", "dating", "ex"]): active_domains.append("relationships")
+        if any(w in context_lower for w in ["work", "job", "career"]): active_domains.append("work")
+        if any(w in context_lower for w in ["sad", "angry", "anxious"]): active_domains.append("emotional")
+        if any(w in context_lower for w in ["improve", "learn", "grow"]): active_domains.append("growth")
 
-    if any(w in context_lower for w in identity_keywords):
+    if "identity" in active_domains:
         clean = {k: v for k, v in profile.items() if k not in ["evolution", "confidence"] and v}
         return json.dumps(clean, ensure_ascii=False, separators=(',', ':'))
 
-    if any(w in context_lower for w in relationship_keywords):
+    if "relationships" in active_domains:
         layer2.update({
             "relationship_patterns": profile.get("relationship_patterns"),
+            "attachment_style": profile.get("attachment_style"),
             "emotional_patterns": profile.get("emotional_patterns"),
-            "behavioral_patterns": profile.get("behavioral_patterns"),
-            "insights_from_files": profile.get("insights_from_files"),
         })
 
-    if any(w in context_lower for w in work_keywords):
+    if "work" in active_domains or "finance" in active_domains:
         layer2.update({
             "job": profile.get("job"),
             "skills": profile.get("skills"),
@@ -303,15 +310,16 @@ def get_profile_for_context(profile: dict, context: str) -> str:
             "learning": profile.get("learning"),
         })
 
-    if any(w in context_lower for w in emotional_keywords):
+    if "emotional" in active_domains or "health" in active_domains:
         layer2.update({
             "fears": profile.get("fears"),
             "emotional_patterns": profile.get("emotional_patterns"),
             "failed_advice": profile.get("failed_advice"),
             "detected_patterns": profile.get("detected_patterns"),
+            "state_of_mind_anomalies": profile.get("state_of_mind_anomalies"),
         })
 
-    if any(w in context_lower for w in growth_keywords):
+    if "growth" in active_domains:
         layer2.update({
             "strengths": profile.get("strengths"),
             "weaknesses": profile.get("weaknesses"),
@@ -319,7 +327,6 @@ def get_profile_for_context(profile: dict, context: str) -> str:
             "contradictions": profile.get("contradictions"),
             "cognitive_biases": profile.get("cognitive_biases"),
             "shadow_traits": profile.get("shadow_traits"),
-            "clinical_profile": profile.get("clinical_profile"),
             "unrealized_truths": profile.get("unrealized_truths"),
         })
 
@@ -441,7 +448,7 @@ RULES:
         # Schema Safety: Strip out null values from Pydantic response to avoid overwriting data with empty fields
         new_data = {k: v for k, v in new_data.items() if v is not None}
 
-        old_evolution_len = len(profile.get("evolution", []))
+        old_evolution_len = len(profile.get("evolution") or [])
         evolution = track_evolution(profile, new_data)
         new_shifts = evolution[old_evolution_len:]
         source = new_data.pop("data_source", "inferred")

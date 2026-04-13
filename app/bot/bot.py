@@ -6,11 +6,12 @@ import asyncio
 import json
 import random
 import math
+import re
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from dotenv import load_dotenv
-from app.db.database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile
+from app.db.database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile, delete_user_messages
 from app.services.chat import get_response
 from app.services.analyzer import analyze_image, analyze_document, analyze_voice
 from app.services.extractor import generate_daily_summary, generate_weekly_summary, run_post_analysis_tasks, set_alert_callback
@@ -59,7 +60,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(save_profile, user_id, profile)
 
     user_sessions[user_id] = True
-    await asyncio.to_thread(lambda: supabase.table("messages").delete().eq("user_id", user_id).execute())
+    await asyncio.to_thread(delete_user_messages, user_id)
     welcome_text = (
         "Hello. I am MYRROR.\n\n"
         "I am not a standard assistant. I am here to be a mirror for your mind, to help you track your growth, and to remember what matters to you.\n"
@@ -224,6 +225,10 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
 
         text = await get_response(user_id, content, is_new_session)
         
+        # Remove the AI's internal monologue (Chain of Thought) before showing it to the user
+        # Using regex to match <thought>...</thought> blocks (including newlines)
+        text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL).strip()
+        
         # Dynamic typing simulation based on mood (slower when sad, faster when energetic)
         mood = profile.get("current_mood_score", 5)
         speed_chars_per_sec = 80.0
@@ -233,19 +238,15 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
             elif mood >= 7:
                 speed_chars_per_sec = 100.0 # Faster, energetic typing
                 
-        typing_delay = min(len(text) / speed_chars_per_sec, 4.0)
+        # Añade varianza aleatoria humana (entre 0.1 y 0.7 segundos extra)
+        typing_delay = min(len(text) / speed_chars_per_sec, 4.0) + random.uniform(0.1, 0.7)
         await asyncio.sleep(typing_delay)
         
-        lower_text = text.lower()
-        mood_triggers = [
-            "how are you feeling", "cómo te sientes", "how do you feel", 
-            "cómo estás", "how are you today", "del 1 al 10",
-            "cómo te encuentras", "how are things today", "qué tal tu día", "how was your day"
-        ]
-        if any(kw in lower_text for kw in mood_triggers) and "?" in text:
+        markup = None
+        # Intercepción dinámica UI (El LLM decide cuándo mostrar el teclado)
+        if "[MOOD_QUERY]" in text:
+            text = text.replace("[MOOD_QUERY]", "").strip()
             markup = get_mood_keyboard()
-        else:
-            markup = None
             
         # Safe chunked sending to avoid 4096 character limit in Telegram
         chunk_size = 4000

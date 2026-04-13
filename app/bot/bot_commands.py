@@ -467,10 +467,7 @@ async def contract_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    await asyncio.to_thread(lambda: supabase.table("profile").delete().eq("user_id", user_id).execute())
-    await asyncio.to_thread(lambda: supabase.table("messages").delete().eq("user_id", user_id).execute())
-    await asyncio.to_thread(lambda: supabase.table("episodes").delete().eq("user_id", user_id).execute())
-    await asyncio.to_thread(lambda: supabase.table("people").delete().eq("user_id", user_id).execute())
+    await asyncio.to_thread(delete_all_user_data, user_id)
     msg = await localize(user_id, "Profile and history cleared. Starting fresh.")
     await update.message.reply_text(msg)
 

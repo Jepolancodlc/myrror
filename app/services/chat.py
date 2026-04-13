@@ -7,7 +7,7 @@ from google.genai import types
 from dotenv import load_dotenv
 from app.core.prompt import SYSTEM_PROMPT
 from app.db.database import get_profile, get_messages, save_message, get_all_people, search_similar_episodes
-from app.services.extractor import get_profile_for_context, compress_history, run_post_analysis_tasks
+from app.services.extractor import get_profile_for_context, compress_history, run_post_analysis_tasks, parse_json_response
 import random
 from datetime import datetime
 
@@ -19,81 +19,88 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 # Task registry: Holds strong references so Python's Garbage Collector doesn't kill async tasks mid-execution.
 background_tasks = set()
 
-def detect_crisis(content: str, history: list, profile: dict) -> bool:
-    crisis_keywords = [
-        "no puedo más", "para qué", "no tiene sentido", "vacío", "solo",
-        "no vale la pena", "rendirse", "desaparecer", "cansado de todo",
-        "can't take it", "what's the point", "give up", "disappear",
-        "no quiero", "harto", "todo mal", "nothing matters", "worthless",
-        "me quiero morir", "no quiero vivir", "i want to die", "kill myself"
-    ]
+async def detect_crisis(content: str, history: list, profile: dict) -> bool:
+    """
+    Dynamic Crisis Detection: Uses Gemini to evaluate implicit subtext and despair,
+    falling back to safety heuristics if the API blocks the request due to self-harm filters.
+    """
+    history_text = "\n".join([f"{m['role']}: {m['content'][:100]}" for m in history[-3:]]) if history else ""
+    prompt = f"""You are a clinical safety evaluator.
+Determine if the user's message indicates an acute psychological crisis, severe despair, or risk of self-harm.
+Look for implicit signs of giving up, extreme apathy, or dangerous distress. 
+Do NOT flag normal venting, frustration, casual sadness, or gaming/work complaints (e.g., "I give up on this code").
 
-    content_lower = content.lower()
-    keyword_hit = any(kw in content_lower for kw in crisis_keywords)
-    hour = datetime.now().hour
-    
-    # Dynamic anomaly detection: avoid triggering if they are naturally a night owl
-    habits = str(profile.get("behavioral_patterns", "")).lower() + str(profile.get("quirks_and_micro_details", "")).lower()
-    is_night_owl = "night owl" in habits or "late night" in habits or "stays up" in habits
-    unusual_hour = (hour >= 23 or hour <= 5) and not is_night_owl
+RECENT CONTEXT:
+{history_text}
 
-    last = profile.get("last_conversation", "")
-    long_silence = False
-    if last:
-        try:
-            last_dt = datetime.strptime(last, "%Y-%m-%d %H:%M")
-            days_silent = (datetime.now() - last_dt).days
-            long_silence = days_silent > 3
-        except:
-            pass
+USER'S NEW MESSAGE:
+"{content}"
 
-    recent_dark = False
-    if history and len(history) >= 2:
-        recent = " ".join([m["content"] for m in history[-4:] if m["role"] == "user"])
-        recent_dark = any(kw in recent.lower() for kw in crisis_keywords)
+Respond EXACTLY with a single word: "true" (if crisis) or "false" (if not)."""
 
-    if keyword_hit and (unusual_hour or long_silence or recent_dark):
-        return True
+    try:
+        response = await client.aio.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=prompt
+        )
+        # Gemini Safety filters often block self-harm text entirely, returning no text.
+        if not response.text:
+            logger.warning("Crisis detection API blocked by safety filters. Defaulting to True.")
+            return True
+            
+        return "true" in response.text.strip().lower()
+    except Exception as e:
+        logger.error(f"Dynamic crisis detection error: {e}")
+        # Fallback Heuristic if API fails
+        fallback_keywords = [
+            "para qué", "no tiene sentido", "no vale la pena", "desaparecer", 
+            "what's the point", "disappear", "me quiero morir", "no quiero vivir", 
+            "i want to die", "kill myself", "end it all", "acabar con todo", 
+            "suicide", "suicidio"
+        ]
+        return any(kw in content.lower() for kw in fallback_keywords)
 
-    keyword_count = sum(1 for kw in crisis_keywords if kw in content_lower)
-    if keyword_count >= 2:
-        return True
-
-    return False
-
-async def analyze_conversation_context(content: str, history: list) -> str:
+async def analyze_conversation_context(content: str, history: list) -> dict:
+    """
+    Semantic Router: Analyzes the chat to extract a 1-sentence summary AND the active life domains.
+    This allows the main prompt to only load the psychological profile sections that actually matter right now.
+    """
     if not history or len(history) < 2:
-        return ""
+        return {"summary": "", "domains": []}
 
-    last_messages = history[-6:]
+    last_messages = history[-5:]
     conversation = "\n".join([
         f"{'User' if m['role'] == 'user' else 'MYRROR'}: {m['content'][:200]}"
         for m in last_messages
     ])
 
-    prompt = f"""You are helping MYRROR understand the conversational flow.
+    prompt = f"""You are MYRROR's cognitive routing system.
 
 RECENT HISTORY:
 {conversation}
 
 NEW MESSAGE: "{content}"
 
-In ONE natural sentence, describe what's happening conversationally.
-Focus on: topic changes, avoidance patterns, unresolved threads, tone shifts.
-Be observational, not mechanical. No labels or categories.
+TASK: Analyze the context and output ONLY a JSON object with:
+1. "summary": ONE concise sentence describing the conversational dynamics (e.g. topic changes, tone shifts, cognitive distortions).
+2. "domains": An array of active life domains. Choose from: ["work", "relationships", "emotional", "growth", "identity", "health", "finance"].
 
-One sentence only.
+Respond ONLY with valid JSON.
 """
 
     try:
         result = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
-            contents=prompt
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        return result.text.strip()
+        data = parse_json_response(result.text)
+        if not data:
+            return {"summary": "", "domains": []}
+        return data
     except Exception as e:
         logger.error(f"Context analysis error: {e}")
-        return ""
+        return {"summary": "", "domains": []}
 
 async def get_response(user_id: str, content: str, new_session: bool = False) -> str:
     profile = await asyncio.to_thread(get_profile, user_id)
@@ -102,6 +109,17 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
     history = await asyncio.to_thread(get_messages, user_id, 30)
     recent_history = history[-10:] if history else []
     compressed_context = await compress_history(user_id, history, profile)
+
+    # --- SEMANTIC ROUTING (DYNAMIC DOMAINS) ---
+    conv_data = {"summary": "", "domains": []}
+    if recent_history and len(recent_history) >= 1:
+        try:
+            conv_data = await analyze_conversation_context(content, recent_history)
+        except Exception as e:
+            logger.error(f"Conversation context error: {e}")
+
+    conv_ctx = conv_data.get("summary", "")
+    active_domains = conv_data.get("domains", [])
 
     ctx = SYSTEM_PROMPT
 
@@ -144,7 +162,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         ctx += "\n\nThe user explicitly started a new session."
 
     # Crisis detection
-    in_crisis = detect_crisis(content, recent_history, profile)
+    in_crisis = await detect_crisis(content, recent_history, profile)
     if in_crisis:
         ctx += "\n\nCRISIS MODE: The user may be struggling right now. Do NOT analyze, push, or give advice. Only listen. Be warm, present, and human. Ask one simple question: are they okay. If things seem serious, gently mention that talking to someone real can help."
 
@@ -167,21 +185,6 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
             
     elif word_count >= 150:
         ctx += "\n\nCOGNITIVE OVERWHELM PROTOCOL: The user just dumped a massive wall of text. DO NOT reply with an equally massive block of text. That feels robotic and overwhelming. Pick the ONE most emotionally painful, contradictory, or important thread in their text and address ONLY that. Ignore the rest for now. Say something like 'You said a lot just now, but I want to stop at this one thing...' Keep your response asymmetrical and grounded."
-
-    # Absolute / Black-and-White Thinking Detection
-    absolutes = ["always", "never", "everyone", "nobody", "ruined", "impossible", "siempre", "nunca", "nadie", "todos", "imposible", "todo el mundo"]
-    content_lower = content.lower()
-    content_lower_words = content_lower.split()
-    if sum(1 for w in absolutes if w in content_lower_words) >= 2:
-        ctx += "\n\nABSOLUTE THINKING DETECTED: The user is using extreme absolutes ('always', 'never', 'everyone', etc.). Gently but firmly challenge this black-and-white thinking. Remind them that reality is rarely that absolute."
-
-    # Conversational context (Moved UP to enhance RAG precision)
-    conv_ctx = ""
-    if recent_history and len(recent_history) >= 2:
-        try:
-            conv_ctx = await analyze_conversation_context(content, recent_history)
-        except Exception as e:
-            logger.error(f"Conversation context error: {e}")
 
     # Venting Detection
     if "[RAPID BURST OF MESSAGES - VENTING DETECTED]" in content:
@@ -215,6 +218,10 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         except Exception as e:
             logger.error(f"Mood stance error: {e}")
             
+    # --- AUTONOMOUS LOOP DETECTION ---
+    if conv_ctx and any(word in conv_ctx.lower() for word in ["loop", "repeating", "same", "rehashing"]):
+        ctx += "\n\nAUTONOMY TRIGGER (LOOP DETECTED): The semantic router detected the user is looping or rehashing the same issue without progressing. DO NOT indulge this. Show agency. Gently but firmly point out they are running in circles. Ask them what they are avoiding by repeating this."
+
     volatility = profile.get("emotional_volatility")
     if volatility and not in_crisis:
         vol_lower = volatility.lower()
@@ -233,7 +240,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         if language:
             ctx += f"\n\nCRITICAL LANGUAGE INSTRUCTION: You MUST respond entirely in {language}."
             
-        ctx += f"\n\nWHAT YOU KNOW ABOUT THIS USER (USE THIS INVISIBLY, DO NOT RECITE IT):\n{get_profile_for_context(profile, content)}"
+        ctx += f"\n\nWHAT YOU KNOW ABOUT THIS USER (USE THIS INVISIBLY, DO NOT RECITE IT):\n{get_profile_for_context(profile, active_domains=active_domains)}"
 
         comm_style = profile.get("communication_style")
         humor = profile.get("humor_style")
@@ -368,39 +375,44 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
                         except:
                             time_ctx = ep_date_str
                         eps_list.append(f"- [{time_ctx}] {ep.get('event')}")
-                    eps_text = "\n".join(eps_list)
-                    ctx += f"\n\nRELEVANT PAST MEMORIES (Triggered by what the user just said):\n{eps_text}"
-                    ctx += "\nCRITICAL ADVICE PROTOCOL (STEALTH MEMORY): Use these past memories INVISIBLY. Sound like a human who just remembered something naturally. If the memory is from 'a long time ago', mention how long it's been. Draw advice from their OWN past track record, and use exact quotes to break through denial."
+                    memory_block.append(f"RELEVANT PAST MEMORIES (Triggered by the user's message):\n{chr(10).join(eps_list)}\nSTEALTH MEMORY: Use these invisibly. Sound like a human who just remembered something naturally. Draw advice from their OWN past track record.")
         except Exception as e:
             logger.error(f"RAG search error for {user_id}: {e}", exc_info=True)
 
-    # People the user knows
     people = await asyncio.to_thread(get_all_people, user_id)
     if people:
-        people_summary = "\n".join([
-            f"- {p['name']} ({p.get('relationship', 'unknown')}): {p.get('notes', {}).get('description', '')}"
-            for p in people
-        ])
-        ctx += f"\n\nPEOPLE IN THEIR LIFE:\n{people_summary}"
+        recent_text = (conv_ctx + " " + content).lower()
+        relevant_people = []
+        for p in people:
+            name_lower = p['name'].lower()
+            if name_lower in recent_text or len(people) <= 5 or "relationships" in active_domains:
+                relevant_people.append(p)
+                
+        if relevant_people:
+            people_summary = "\n".join([f"- {p['name']} ({p.get('relationship', 'unknown')}): {p.get('notes', {}).get('description', '')}" for p in relevant_people])
+            memory_block.append(f"RELEVANT PEOPLE IN THEIR LIFE:\n{people_summary}")
 
-    # Inject the compressed older history summary if it exists
+    # --- 5. HISTORY ---
+    history_block = []
     if compressed_context:
-        ctx += f"\n\nCOMPRESSED OLDER CONTEXT:\n{compressed_context}"
-
+        history_block.append(f"COMPRESSED OLDER CONTEXT:\n{compressed_context}")
     if conv_ctx:
-        ctx += f"\n\nCONVERSATIONAL CONTEXT: {conv_ctx}"
-
-    # Recent history — last 10 only
+        history_block.append(f"CONVERSATIONAL CONTEXT: {conv_ctx}")
     if recent_history:
-        ctx += "\n\nRECENT HISTORY:\n"
-        for msg in recent_history:
-            role = "User" if msg["role"] == "user" else "MYRROR"
-            safe_content = msg['content'] if len(msg['content']) <= 2500 else msg['content'][:2500] + "... [truncated]"
-            ctx += f"{role}: {safe_content}\n"
+        recent_str = "\n".join([f"{'User' if msg['role'] == 'user' else 'MYRROR'}: {msg['content'][:2500]}" for msg in recent_history])
+        history_block.append(f"RECENT HISTORY:\n{recent_str}")
 
+    # --- ASSEMBLE THE GOD PROMPT ---
+    prompt_parts = [SYSTEM_PROMPT]
+    if temporal_block: prompt_parts.append("<temporal_context>\n" + "\n\n".join(temporal_block) + "\n</temporal_context>")
+    if diagnostics_block: prompt_parts.append("<behavioral_diagnostics>\n" + "\n\n".join(diagnostics_block) + "\n</behavioral_diagnostics>")
+    if profile_block: prompt_parts.append("<psychological_directives>\n" + "\n\n".join(profile_block) + "\n</psychological_directives>")
+    if memory_block: prompt_parts.append("<episodic_memory>\n" + "\n\n".join(memory_block) + "\n</episodic_memory>")
+    if history_block: prompt_parts.append("<conversation_history>\n" + "\n\n".join(history_block) + "\n</conversation_history>")
+    
+    ctx = "\n\n".join(prompt_parts)
     ctx += f"\nUser: {content}\nMYRROR:"
 
-    # Safety First: Save user message immediately to guarantee chronological order regardless of Gemini API latency.
     try:
         await asyncio.to_thread(save_message, user_id, "user", content)
     except Exception as e:

@@ -94,6 +94,14 @@ def save_message(user_id: str, role: str, content: str):
     except Exception as e:
         logger.error(f"save_message error for {user_id}: {e}", exc_info=True)
 
+def delete_user_messages(user_id: str):
+    """Safely clears a user's short-term message history."""
+    try:
+        if not supabase: return
+        supabase.table("messages").delete().eq("user_id", user_id).execute()
+    except Exception as e:
+        logger.error(f"delete_user_messages error for {user_id}: {e}", exc_info=True)
+
 def save_episode(user_id: str, event: str, domain: str = None, impact: str = None, embedding: list = None):
     """Saves an autobiographical event ("Episode") and its mathematical vector into the Semantic RAG memory."""
     try:
@@ -204,3 +212,14 @@ def save_person(user_id: str, name: str, relationship: str = None, notes: dict =
             }).execute()
     except Exception as e:
         logger.error(f"save_person error for {user_id}: {e}", exc_info=True)
+
+def delete_all_user_data(user_id: str):
+    """Hard reset: Erases all profiles, messages, episodes, and people for a given user."""
+    try:
+        if not supabase: return
+        supabase.table("profile").delete().eq("user_id", user_id).execute()
+        supabase.table("messages").delete().eq("user_id", user_id).execute()
+        supabase.table("episodes").delete().eq("user_id", user_id).execute()
+        supabase.table("people").delete().eq("user_id", user_id).execute()
+    except Exception as e:
+        logger.error(f"delete_all_user_data error for {user_id}: {e}", exc_info=True)
