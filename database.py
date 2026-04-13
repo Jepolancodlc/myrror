@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from supabase import create_client
 from dotenv import load_dotenv
 import os
@@ -16,6 +17,14 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     supabase = None
 else:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Diccionario global para mantener los locks por usuario y evitar Race Conditions
+_user_locks = {}
+
+def get_user_lock(user_id: str) -> asyncio.Lock:
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
 
 def get_profile(user_id: str) -> dict:
     try:

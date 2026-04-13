@@ -6,7 +6,7 @@ import random
 import math
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile
+from database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile, get_user_lock
 from extractor import track_evolution, generate_weekly_summary
 from google import genai
 from datetime import datetime
@@ -79,7 +79,7 @@ async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
-    try:
+    def _generate_mood_graph(mood_data):
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
@@ -100,8 +100,12 @@ async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buf = io.BytesIO()
         fig.savefig(buf, format='png')
         buf.seek(0)
-        import matplotlib.pyplot as plt
         plt.close(fig)
+        return buf
+
+    try:
+        # Ejecutar la tarea de CPU intensiva fuera del hilo principal asíncrono
+        buf = await asyncio.to_thread(_generate_mood_graph, mood_data)
 
         msg_cap = await localize(user_id, "Here is how your mood has been trending.", profile)
         await update.message.reply_photo(photo=buf, caption=msg_cap)
@@ -187,7 +191,7 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     big_five = profile.get("clinical_profile", {}).get("big_five")
     if isinstance(big_five, dict) and len(big_five) >= 5:
-        try:
+        def _generate_radar_chart(bf):
             import matplotlib
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
@@ -195,11 +199,11 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             labels = ['Openness', 'Conscientiousness', 'Extraversion', 'Agreeableness', 'Neuroticism']
             values = [
-                float(big_five.get("O", 5)),
-                float(big_five.get("C", 5)),
-                float(big_five.get("E", 5)),
-                float(big_five.get("A", 5)),
-                float(big_five.get("N", 5))
+                float(bf.get("O", 5)),
+                float(bf.get("C", 5)),
+                float(bf.get("E", 5)),
+                float(bf.get("A", 5)),
+                float(bf.get("N", 5))
             ]
             
             num_vars = len(labels)
@@ -220,8 +224,11 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buf = io.BytesIO()
             fig.savefig(buf, format='png', bbox_inches='tight')
             buf.seek(0)
-            import matplotlib.pyplot as plt
             plt.close(fig)
+            return buf
+
+        try:
+            buf = await asyncio.to_thread(_generate_radar_chart, big_five)
             
             msg_cap = await localize(user_id, "This is the shape of your personality based on our interactions.", profile)
             await update.message.reply_photo(photo=buf, caption=msg_cap)
@@ -271,7 +278,11 @@ async def dossier_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     msg = await localize(user_id, "\n".join(lines), profile)
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    try:
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.warning(f"Markdown parse failed in dossier, sending clean: {e}")
+        await update.message.reply_text(msg)
 
 async def setcompass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -282,11 +293,15 @@ async def setcompass_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(msg, parse_mode="Markdown")
         return
         
-    profile = await asyncio.to_thread(get_profile, user_id)
-    profile["life_compass"] = compass_text
-    await asyncio.to_thread(save_profile, user_id, profile)
+    async with get_user_lock(user_id):
+        profile = await asyncio.to_thread(get_profile, user_id)
+        profile["life_compass"] = compass_text
+        await asyncio.to_thread(save_profile, user_id, profile)
     msg = await localize(user_id, "🧭 **Life Compass Updated**\n\nI have anchored this to your core profile. I will use it to guide you back when you feel lost.", profile)
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    try:
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text(msg)
 
 async def evolution_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -391,7 +406,10 @@ INSTRUCTIONS:
 """
     try:
         response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
-        await status_msg.edit_text(response.text)
+        try:
+            await status_msg.edit_text(response.text, parse_mode="Markdown")
+        except Exception:
+            await status_msg.edit_text(response.text)
     except Exception as e:
         logger.error(f"Reflect command error: {e}")
         msg_err = await localize(user_id, "I had trouble generating your reflection. Try again in a moment.", profile)
@@ -420,13 +438,14 @@ async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = str(query.from_user.id)
     mood_val = query.data.split("_")[1]
-    profile = await asyncio.to_thread(get_profile, user_id)
-    new_data = {"current_mood_score": int(mood_val)}
-    evolution = track_evolution(profile, new_data)
-    profile["current_mood_score"] = int(mood_val)
-    if evolution:
-        profile["evolution"] = evolution
-    await asyncio.to_thread(save_profile, user_id, profile)
+    async with get_user_lock(user_id):
+        profile = await asyncio.to_thread(get_profile, user_id)
+        new_data = {"current_mood_score": int(mood_val)}
+        evolution = track_evolution(profile, new_data)
+        profile["current_mood_score"] = int(mood_val)
+        if evolution:
+            profile["evolution"] = evolution
+        await asyncio.to_thread(save_profile, user_id, profile)
     val = int(mood_val)
     category = "low" if val <= 4 else ("mid" if val <= 7 else "high")
     response_texts = {"low": "You clicked low... I'm sorry things are heavy right now. I'm here if you want to vent.", "mid": "Right down the middle. Surviving the day. Anything specific on your mind?", "high": "Glad to see you're doing well! Tell me what's making it a good day."}

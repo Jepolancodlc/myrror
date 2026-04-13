@@ -32,6 +32,8 @@ user_message_buffers = {}
 user_quiz_options = {}
 telegram_app = None
 
+_bg_tasks = set()
+
 
 class QuizSchema(BaseModel):
     question: str
@@ -141,7 +143,9 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         text = await analyze_image(user_id, file_bytes, caption)
         profile = await asyncio.to_thread(get_profile, user_id)
-        asyncio.create_task(run_post_analysis_tasks(user_id, "image", f"Image: {caption}", text, profile))
+        task = asyncio.create_task(run_post_analysis_tasks(user_id, "image", f"Image: {caption}", text, profile))
+        _bg_tasks.add(task)
+        task.add_done_callback(_bg_tasks.discard)
         await status_msg.edit_text(text)
     except Exception as e:
         logger.error(f"Image handler error for {user_id}: {e}", exc_info=True)
@@ -184,7 +188,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text(msg_err)
             return
         profile = await asyncio.to_thread(get_profile, user_id)
-        asyncio.create_task(run_post_analysis_tasks(user_id, f"file:{document.file_name}", f"File: {caption}", text, profile))
+        task = asyncio.create_task(run_post_analysis_tasks(user_id, f"file:{document.file_name}", f"File: {caption}", text, profile))
+        _bg_tasks.add(task)
+        task.add_done_callback(_bg_tasks.discard)
         await status_msg.edit_text(text)
     except Exception as e:
         logger.error(f"Document handler error for {user_id}: {e}", exc_info=True)
@@ -240,21 +246,41 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
             "cómo te encuentras", "how are things today", "qué tal tu día", "how was your day"
         ]
         if any(kw in lower_text for kw in mood_triggers) and "?" in text:
-            await update.message.reply_text(text, reply_markup=get_mood_keyboard())
+            markup = get_mood_keyboard()
         else:
-            await update.message.reply_text(text)
+            markup = None
+            
+        # Safe chunked sending to avoid 4096 character limit in Telegram
+        chunk_size = 4000
+        for i in range(0, len(text), chunk_size):
+            chunk = text[i:i+chunk_size]
+            try:
+                if i + chunk_size >= len(text) and markup:
+                    await update.message.reply_text(chunk, reply_markup=markup, parse_mode="Markdown")
+                else:
+                    await update.message.reply_text(chunk, parse_mode="Markdown")
+            except Exception as e:
+                logger.warning(f"Markdown parse failed, falling back to plain text: {e}")
+                if i + chunk_size >= len(text) and markup:
+                    await update.message.reply_text(chunk, reply_markup=markup)
+                else:
+                    await update.message.reply_text(chunk)
 
         if is_first_today:
             # Daily summary of yesterday
             messages = await asyncio.to_thread(get_messages, user_id, 20)
             if messages:
-                asyncio.create_task(generate_daily_summary(user_id, profile, messages))
+                task = asyncio.create_task(generate_daily_summary(user_id, profile, messages))
+                _bg_tasks.add(task)
+                task.add_done_callback(_bg_tasks.discard)
 
         # Weekly summary on Sundays
         if datetime.now().weekday() == 6 and is_first_today:
             messages = await asyncio.to_thread(get_messages, user_id, 40)
             episodes = await asyncio.to_thread(get_episodes, user_id, limit=20)
-            asyncio.create_task(generate_weekly_summary(user_id, profile, messages, episodes))
+            task = asyncio.create_task(generate_weekly_summary(user_id, profile, messages, episodes))
+            _bg_tasks.add(task)
+            task.add_done_callback(_bg_tasks.discard)
 
     except Exception as e:
         logger.error(f"Message processing error for {user_id}: {e}", exc_info=True)

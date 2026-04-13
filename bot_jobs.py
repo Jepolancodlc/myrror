@@ -4,11 +4,46 @@ import random
 import os
 from datetime import datetime
 from google import genai
-from database import get_all_profiles, get_null_episodes, update_episode_embedding, supabase, save_message
+from database import get_all_profiles, get_null_episodes, update_episode_embedding, supabase, save_message, get_user_lock, get_profile, save_profile
 from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Registry for background tasks to avoid GC death
+_bg_tasks = set()
+
+async def _process_user_checkin(context, user_id, data, days_silent, thresholds, now):
+    """Handles individual proactive check-in asynchronously without blocking the main loop."""
+    try:
+        await context.bot.send_chat_action(chat_id=user_id, action="typing")
+        await asyncio.sleep(random.uniform(2.5, 5.0))
+        
+        mood = data.get("current_mood_score", "unknown")
+        unresolved = data.get("unresolved_threads", [])
+        threads_ctx = f"Pending topics you guys left hanging: {unresolved}" if unresolved else ""
+        events = data.get("upcoming_events", [])
+        events_ctx = f"Upcoming/Recent events they had: {events}" if events else ""
+        language = data.get("language", "their native language")
+
+        if days_silent == thresholds[2]:
+            prompt = f"The user {data.get('name', '')} has completely isolated themselves and ignored your check-ins for {days_silent} days. Their last mood was {mood}/10. Write a slightly more direct, 'tough love' but deeply caring message. Acknowledge that they are hiding/withdrawing, and tell them you are not going anywhere. CRITICAL: Respond entirely in {language}."
+        else:
+            prompt = f"The user {data.get('name', '')} hasn't spoken to you in {days_silent} days. Their last mood was {mood}/10. {threads_ctx}. {events_ctx}. Write a very short, warm, pressure-free message checking in. Sound like a friend who just thought of them. If they had an upcoming event, ASK ABOUT IT specifically. If they were sad last time, be gentle. CRITICAL: Respond entirely in {language}."
+        
+        response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
+        text = response.text.strip()
+        await context.bot.send_message(chat_id=user_id, text=text)
+        
+        # CRITICAL MEMORY FIX: Save this to the chat history so MYRROR remembers reaching out
+        await asyncio.to_thread(save_message, user_id, "assistant", f"[Proactive Check-in] {text}")
+        
+        async with get_user_lock(user_id):
+            current_data = await asyncio.to_thread(get_profile, user_id)
+            current_data["last_conversation"] = now.strftime("%Y-%m-%d %H:%M")
+            await asyncio.to_thread(save_profile, user_id, current_data)
+    except Exception as e:
+        logger.error(f"Proactive job error for {user_id}: {e}")
 
 async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
     """Checks if users have been silent for 3+ days and reaches out to them."""

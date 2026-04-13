@@ -2,6 +2,7 @@ import logging
 import os
 import asyncio
 from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 from prompt import SYSTEM_PROMPT
 from database import get_profile, get_messages, save_message, get_all_people, search_similar_episodes
@@ -13,6 +14,9 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Registro de tareas en segundo plano para evitar su destrucción por el GC
+background_tasks = set()
 
 def detect_crisis(content: str, history: list, profile: dict) -> bool:
     crisis_keywords = [
@@ -165,6 +169,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
 
     # Absolute / Black-and-White Thinking Detection
     absolutes = ["always", "never", "everyone", "nobody", "ruined", "impossible", "siempre", "nunca", "nadie", "todos", "imposible", "todo el mundo"]
+    content_lower = content.lower()
     content_lower_words = content_lower.split()
     if sum(1 for w in absolutes if w in content_lower_words) >= 2:
         ctx += "\n\nABSOLUTE THINKING DETECTED: The user is using extreme absolutes ('always', 'never', 'everyone', etc.). Gently but firmly challenge this black-and-white thinking. Remind them that reality is rarely that absolute."
@@ -394,24 +399,65 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
 
     ctx += f"\nUser: {content}\nMYRROR:"
 
+    # 1. Guardar primero el mensaje del usuario para garantizar el orden cronológico
+    # sin importar cuánto tarde la API de Gemini en responder.
+    try:
+        await asyncio.to_thread(save_message, user_id, "user", content)
+    except Exception as e:
+        logger.error(f"User message save error for {user_id}: {e}", exc_info=True)
+
     try:
         response = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
-            contents=ctx
+            contents=ctx,
+            config=types.GenerateContentConfig(
+                tools=[{"google_search": {}}]
+            )
         )
-        text = response.text
+        text = response.text or "I'm having a hard time processing my thoughts right now. Give me a moment."
+        
+        # Extract and format Google Search sources if MYRROR used the internet
+        if response.candidates and response.candidates[0].grounding_metadata:
+            chunks = response.candidates[0].grounding_metadata.grounding_chunks
+            if chunks:
+                sources = []
+                unique_links = {}
+                replacements = {}
+                for i, chunk in enumerate(chunks):
+                    if getattr(chunk, 'web', None) and chunk.web.uri:
+                        uri = chunk.web.uri
+                        # Remove brackets from title to prevent breaking Telegram's Markdown
+                        title = chunk.web.title.replace('[', '').replace(']', '')
+                        if uri not in unique_links:
+                            unique_links[uri] = len(unique_links) + 1
+                            sources.append(f"{unique_links[uri]}. [{title}]({uri})")
+                        
+                        ref_num = unique_links[uri]
+                        marker = f"[{i+1}]"
+                        placeholder = f"@@@REF_{i+1}@@@"
+                        if marker in text:
+                            text = text.replace(marker, placeholder)
+                            replacements[placeholder] = f"[[{ref_num}]]({uri})"
+                            
+                # Apply inline markdown link replacements securely
+                for placeholder, md_link in replacements.items():
+                    text = text.replace(placeholder, md_link)
+                
+                if sources:
+                    text += "\n\n🔍 **Sources:**\n" + "\n".join(sources)
     except Exception as e:
         logger.error(f"Gemini error for {user_id}: {e}", exc_info=True)
         return "I'm having a hard time processing my thoughts right now. Give me a moment."
 
     try:
-        # Grabación estricta y secuencial para preservar el orden cronológico
-        await asyncio.to_thread(save_message, user_id, "user", content)
+        # 2. Guardar la respuesta de la IA después
         await asyncio.to_thread(save_message, user_id, "assistant", text)
     except Exception as e:
-        logger.error(f"Message save error for {user_id}: {e}", exc_info=True)
+        logger.error(f"Assistant message save error for {user_id}: {e}", exc_info=True)
 
     if len(content.split()) > 3 or len(content) > 15 or in_crisis or "[RAPID BURST" in content or "[Voice" in content:
-        asyncio.create_task(run_post_analysis_tasks(user_id, "message", content, text, profile, in_crisis))
+        task = asyncio.create_task(run_post_analysis_tasks(user_id, "message", content, text, profile, in_crisis))
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
 
     return text

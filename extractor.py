@@ -7,7 +7,7 @@ import random
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from database import get_profile, save_profile, save_episode, save_person, get_all_people, save_message, get_episodes
+from database import get_profile, save_profile, save_episode, save_person, get_all_people, save_message, get_episodes, get_user_lock, get_messages
 from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
@@ -22,6 +22,9 @@ alert_callback = None
 def set_alert_callback(cb):
     global alert_callback
     alert_callback = cb
+
+# Keep strong references to background tasks so the GC doesn't kill them
+_bg_tasks = set()
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PYDANTIC SCHEMAS (STRUCTURED OUTPUTS)
@@ -173,8 +176,10 @@ Format cleanly. Respond in {language}.
             # Save this epiphany as a message so it's in the history and MYRROR remembers sending it
             await asyncio.to_thread(save_message, user_id, "assistant", f"[Proactive Epiphany] {text}")
             
-            profile["last_epiphany"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-            await asyncio.to_thread(save_profile, user_id, profile)
+            async with get_user_lock(user_id):
+                curr_prof = await asyncio.to_thread(get_profile, user_id)
+                curr_prof["last_epiphany"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                await asyncio.to_thread(save_profile, user_id, curr_prof)
     except Exception as e:
         logger.error(f"Epiphany generation error: {e}", exc_info=True)
 
@@ -512,16 +517,17 @@ RULES:
         source = new_data.pop("data_source", "inferred")
         confidence = update_confidence(profile, new_data, source)
 
-        # CRITICAL BUG FIX: Re-fetch profile right before merging to prevent Race Condition overwrites
-        current_db_profile = await asyncio.to_thread(get_profile, user_id)
-        updated = deep_merge(current_db_profile, new_data)
-        updated["evolution"] = evolution
-        updated["confidence"] = confidence
-        updated["last_conversation"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        updated["total_conversations"] = updated.get("total_conversations", 0) + 1
+        # MUTEX LOCK: Previene que otra tarea lea/modifique el perfil simultáneamente
+        async with get_user_lock(user_id):
+            current_db_profile = await asyncio.to_thread(get_profile, user_id)
+            updated = deep_merge(current_db_profile, new_data)
+            updated["evolution"] = evolution
+            updated["confidence"] = confidence
+            updated["last_conversation"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            updated["total_conversations"] = updated.get("total_conversations", 0) + 1
 
-        await asyncio.to_thread(save_profile, user_id, updated)
-        logger.info(f"Profile updated for {user_id} | Context: {context_type}")
+            await asyncio.to_thread(save_profile, user_id, updated)
+            logger.info(f"Profile updated for {user_id} | Context: {context_type}")
         
         # --- AUTONOMY LOGIC ---
         drastic_shifts = [
@@ -530,7 +536,9 @@ RULES:
             and updated.get("confidence", {}).get(s['field'], {}).get("level") == "high"
         ]
         if drastic_shifts and alert_callback:
-            asyncio.create_task(evaluate_and_send_epiphany(user_id, updated, drastic_shifts))
+            task = asyncio.create_task(evaluate_and_send_epiphany(user_id, updated, drastic_shifts))
+            _bg_tasks.add(task)
+            task.add_done_callback(_bg_tasks.discard)
             
         return updated
 
@@ -788,16 +796,18 @@ async def compress_history(user_id: str, messages: list, profile: dict) -> str:
         )
         summary = result.text.strip()
         
-        # CRITICAL BUG FIX: Fetch current profile to avoid overwriting background analysis
         async def save_cache():
-            curr_prof = await asyncio.to_thread(get_profile, user_id)
-            curr_prof["history_cache"] = {
-                "summary": summary,
-                "last_msg_time": older[-1].get("created_at", "")
-            }
-            await asyncio.to_thread(save_profile, user_id, curr_prof)
+            async with get_user_lock(user_id):
+                curr_prof = await asyncio.to_thread(get_profile, user_id)
+                curr_prof["history_cache"] = {
+                    "summary": summary,
+                    "last_msg_time": older[-1].get("created_at", "")
+                }
+                await asyncio.to_thread(save_profile, user_id, curr_prof)
             
-        asyncio.create_task(save_cache())
+        task = asyncio.create_task(save_cache())
+        _bg_tasks.add(task)
+        task.add_done_callback(_bg_tasks.discard)
         
         return summary
     except Exception as e:
