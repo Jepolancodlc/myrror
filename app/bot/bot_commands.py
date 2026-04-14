@@ -5,6 +5,9 @@ import asyncio
 import json
 import random
 import math
+import hashlib
+import redis.asyncio as redis
+from tenacity import retry, stop_after_attempt, wait_exponential
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from app.db.database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile, get_user_lock, delete_all_user_data
@@ -14,8 +17,13 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379"
+redis_client = redis.from_url(REDIS_URL)
 
-translation_cache = {}
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
+async def safe_generate_content(*args, **kwargs):
+    """Previene que los comandos fallen si la API de Gemini tiene caídas temporales de red."""
+    return await client.aio.models.generate_content(*args, **kwargs)
 
 def get_mood_keyboard():
     return InlineKeyboardMarkup([
@@ -49,15 +57,12 @@ async def localize(user_id: str, text: str, profile: dict = None) -> str:
     if lang_key in ["english", "en", "en-us", "en-gb"]:
         return text
 
-    if lang_key not in translation_cache:
-        translation_cache[lang_key] = {}
-        
-    if text in translation_cache[lang_key]:
-        return translation_cache[lang_key][text]
-
-    # Límite FIFO para prevenir fuga de memoria a largo plazo
-    if len(translation_cache[lang_key]) > 1000:
-        translation_cache[lang_key].pop(next(iter(translation_cache[lang_key])))
+    # Caché distribuido y persistente con Redis usando hash MD5
+    text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+    redis_key = f"lang:{lang_key}:{text_hash}"
+    cached = await redis_client.get(redis_key)
+    if cached:
+        return cached.decode('utf-8')
 
     prompt = f"""Translate the following text to {language}.
 CRITICAL: Maintain the exact same formatting, Markdown, and emojis. Do NOT add any conversational text. Return ONLY the translated text.
@@ -65,9 +70,9 @@ CRITICAL: Maintain the exact same formatting, Markdown, and emojis. Do NOT add a
 TEXT TO TRANSLATE:
 {text}"""
     try:
-        response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
+        response = await safe_generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
         translated = response.text.strip()
-        translation_cache[lang_key][text] = translated
+        await redis_client.set(redis_key, translated, ex=86400 * 30) # Retener por 30 días
         return translated
     except Exception as e:
         logger.error(f"Localization error: {e}")
@@ -413,7 +418,6 @@ INSTRUCTIONS:
 """
     try:
         response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
-        response = await safe_generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
         try:
             await status_msg.edit_text(response.text, parse_mode="Markdown")
         except Exception:
@@ -502,7 +506,6 @@ async def flashback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.chat.send_action("typing")
     try:
         response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
-        response = await safe_generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
         await update.message.reply_text(response.text.strip())
     except Exception as e:
         logger.error(f"Flashback error: {e}")

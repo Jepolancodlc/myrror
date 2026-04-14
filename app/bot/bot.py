@@ -22,6 +22,7 @@ from google import genai
 from google.genai import types
 from datetime import datetime
 from app.models.schemas import QuizSchema
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 load_dotenv()
 
@@ -31,6 +32,11 @@ REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379"
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 redis_client = redis.from_url(REDIS_URL)
 telegram_app = None
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
+async def safe_generate_content(*args, **kwargs):
+    """Auto-retry for Gemini API if Google returns 429 (Rate Limit) or network timeouts."""
+    return await client.aio.models.generate_content(*args, **kwargs)
 
 _bg_tasks = set()
 
@@ -57,7 +63,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         profile["language"] = update.effective_user.language_code
         await asyncio.to_thread(save_profile, user_id, profile)
 
-    await redis_client.set(f"session:{user_id}", "1", ex=86400)
+    try:
+        await redis_client.set(f"session:{user_id}", "1", ex=86400)
+    except Exception as e:
+        logger.error(f"Redis connection error on start: {e}")
+        await update.message.reply_text("⚠️ **Error de Base de Datos**\nNo puedo conectarme a Redis. Por favor, ve a Render y asegúrate de que tu variable `REDIS_URL` comience exactamente con `rediss://` (con doble 's' para encriptación SSL).", parse_mode="Markdown")
+        return
+
     await asyncio.to_thread(delete_user_messages, user_id)
     welcome_text = (
         "Hello. I am MYRROR.\n\n"
@@ -82,7 +94,7 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Make it practical, situational, or metaphoric. Target their blind spots or shadow traits.
 User Profile: {json.dumps(profile)}"""
     try:
-        response = await client.aio.models.generate_content(
+        response = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -349,10 +361,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     current_time = time.time()
     
-    # Almacenar en Redis y refrescar marca de tiempo
-    await redis_client.rpush(f"buffer:{user_id}", content)
-    await redis_client.expire(f"buffer:{user_id}", 300) # Prevenir orphans tras 5 min
-    await redis_client.set(f"last_msg:{user_id}", current_time, ex=300)
+    try:
+        # Almacenar en Redis y refrescar marca de tiempo
+        await redis_client.rpush(f"buffer:{user_id}", content)
+        await redis_client.expire(f"buffer:{user_id}", 300) # Prevenir orphans tras 5 min
+        await redis_client.set(f"last_msg:{user_id}", current_time, ex=300)
+    except Exception as e:
+        logger.error(f"Redis error in handle_message: {e}")
+        await update.message.reply_text("⚠️ **Error de Base de Datos**\nNo puedo conectarme a mi memoria temporal (Redis). Revisa tu `REDIS_URL`.", parse_mode="Markdown")
+        return
 
     async def debounced(eval_time):
         try:

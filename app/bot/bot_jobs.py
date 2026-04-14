@@ -7,12 +7,23 @@ from datetime import datetime, timedelta
 from google import genai
 from app.db.database import get_null_episodes, update_episode_embedding, supabase, save_message, get_user_lock, get_profile, save_profile
 from telegram.ext import ContextTypes
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # Registry for background tasks to avoid GC death
 _bg_tasks = set()
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
+async def safe_generate_content(*args, **kwargs):
+    """Protects proactive check-ins from network failures."""
+    return await client.aio.models.generate_content(*args, **kwargs)
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
+async def safe_embed_content(*args, **kwargs):
+    """Protects vector memory generation from network failures."""
+    return await client.aio.models.embed_content(*args, **kwargs)
 
 async def _process_user_checkin(context, user_id, data, days_silent, thresholds, now):
     """Handles individual proactive check-in asynchronously without blocking the main loop."""
@@ -32,7 +43,7 @@ async def _process_user_checkin(context, user_id, data, days_silent, thresholds,
         else:
             prompt = f"The user {data.get('name', '')} hasn't spoken to you in {days_silent} days. Their last mood was {mood}/10. {threads_ctx}. {events_ctx}. Write a very short, warm, pressure-free message checking in. Sound like a friend who just thought of them. If they had an upcoming event, ASK ABOUT IT specifically. If they were sad last time, be gentle. CRITICAL: Respond entirely in {language}."
         
-        response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
+        response = await safe_generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
         text = response.text.strip()
         await context.bot.send_message(chat_id=user_id, text=text)
         
@@ -115,7 +126,7 @@ async def daily_maintenance_job(context: ContextTypes.DEFAULT_TYPE):
             event = ep.get("event")
             if not event: continue
             try:
-                emb_res = await client.aio.models.embed_content(model="text-embedding-004", contents=event)
+                emb_res = await safe_embed_content(model="text-embedding-004", contents=event)
                 if emb_res.embeddings:
                     await asyncio.to_thread(update_episode_embedding, ep["id"], emb_res.embeddings[0].values)
                     fixed += 1
