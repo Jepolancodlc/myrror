@@ -345,6 +345,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         ctx += "\nDo not just give the answers or lecture. Guide them to their own epiphanies. Use SOCRATIC SILENCE when they are venting, ask ONE penetrating question when they are stuck, or use VERBATIM MIRRORING to show them their own contradictions. NEVER force a question if a supportive statement or silence is more natural."
 
     # Semantic RAG Memory Engine
+    memory_block = []
     # Semantic RAG Trigger: Only run costly vector searches if the message has substance (ignores "yes", "ok").
     if len(content.split()) > 3 or len(content) > 15 or conv_ctx:
         try:
@@ -403,14 +404,11 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         history_block.append(f"RECENT HISTORY:\n{recent_str}")
 
     # --- ASSEMBLE THE GOD PROMPT ---
-    prompt_parts = [SYSTEM_PROMPT]
-    if temporal_block: prompt_parts.append("<temporal_context>\n" + "\n\n".join(temporal_block) + "\n</temporal_context>")
-    if diagnostics_block: prompt_parts.append("<behavioral_diagnostics>\n" + "\n\n".join(diagnostics_block) + "\n</behavioral_diagnostics>")
-    if profile_block: prompt_parts.append("<psychological_directives>\n" + "\n\n".join(profile_block) + "\n</psychological_directives>")
-    if memory_block: prompt_parts.append("<episodic_memory>\n" + "\n\n".join(memory_block) + "\n</episodic_memory>")
-    if history_block: prompt_parts.append("<conversation_history>\n" + "\n\n".join(history_block) + "\n</conversation_history>")
-    
-    ctx = "\n\n".join(prompt_parts)
+    if memory_block:
+        ctx += "\n\n<episodic_memory>\n" + "\n\n".join(memory_block) + "\n</episodic_memory>"
+    if history_block:
+        ctx += "\n\n<conversation_history>\n" + "\n\n".join(history_block) + "\n</conversation_history>"
+
     ctx += f"\nUser: {content}\nMYRROR:"
 
     try:
