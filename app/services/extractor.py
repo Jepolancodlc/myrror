@@ -8,6 +8,7 @@ import asyncio
 import random
 from google import genai
 from google.genai import types
+from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
 from app.db.database import get_profile, save_profile, save_episode, save_person, get_all_people, save_message, get_episodes, get_user_lock, get_messages, search_similar_episodes
 from app.models.schemas import PersonSchema, ProfileSchema, EpisodeSchema
@@ -26,6 +27,11 @@ def set_alert_callback(cb):
 
 # Keep strong references to background tasks so the GC doesn't kill them
 _bg_tasks = set()
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
+async def safe_generate_content(*args, **kwargs):
+    """Previene que los resúmenes y extracción de memoria mueran si la API parpadea."""
+    return await client.aio.models.generate_content(*args, **kwargs)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # EPIPHANY ENGINE (AUTONOMOUS INSIGHTS)
@@ -86,7 +92,7 @@ Do not ask them to reply unless it's a very natural rhetorical question.
 Format cleanly. Respond in {language}.
 """
     try:
-        response = await client.aio.models.generate_content(
+        response = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt
         )
@@ -363,7 +369,7 @@ CRITICAL RULES:
 3. Analyze the POWER DYNAMIC. Determine if the relationship is equal, toxic, codependent, or if one seeks validation from the other.
 """
     try:
-        result = await client.aio.models.generate_content(
+        result = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -440,7 +446,7 @@ RULES:
 """
 
     try:
-        result = await client.aio.models.generate_content(
+        result = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -523,7 +529,7 @@ CRITICAL RULES for Extraction:
 8. NO META-MEMORIES: Never extract "The user talked to MYRROR about..." or "The user realized with the AI...". Extract the actual real-world fact (e.g., "The user got fired", NOT "The user told the AI they got fired").
 """
     try:
-        result = await client.aio.models.generate_content(
+        result = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -607,7 +613,7 @@ INSTRUCTIONS:
 6. CRITICAL: Respond entirely in {language}.
 """
     try:
-        result = await client.aio.models.generate_content(
+        result = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt
         )
@@ -663,7 +669,7 @@ Focus on how their 'cognition_style' and 'behavioral_patterns' manifested today.
 Include a brief self-critique: What approach worked or failed for MYRROR today based on their psyche? What should MYRROR change next time?
 """
     try:
-        result = await client.aio.models.generate_content(
+        result = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt
         )
@@ -740,7 +746,7 @@ async def compress_history(user_id: str, messages: list, profile: dict) -> str:
     # OPTIMIZATION 4: Minimized prompt instructions
     prompt = f"Summarize this chat in max 3 sentences. Focus on key topics and emotions.\nCHAT:\n{conversation}"
     try:
-        result = await client.aio.models.generate_content(
+        result = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt
         )

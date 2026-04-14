@@ -4,14 +4,18 @@ import logging
 import os
 
 logger = logging.getLogger(__name__)
-MYRROR_URL = os.getenv("MYRROR_URL", "https://myrror.onrender.com")
+
+# Render inyecta automáticamente RENDER_EXTERNAL_URL en producción
+MYRROR_URL = os.getenv("RENDER_EXTERNAL_URL", os.getenv("MYRROR_URL", "http://localhost:8000"))
 
 async def keep_alive():
     while True:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 response = await client.get(f"{MYRROR_URL}/health")
-                logger.info(f"Keep-alive ping: {response.status_code}")
+                logger.debug(f"Self-ping successful: {response.status_code}")
         except Exception as e:
-            logger.error(f"Keep-alive error: {e}")
-        await asyncio.sleep(600)
+            logger.warning(f"Self-ping failed (normal during startup): {e}")
+        
+        # 840 segundos = 14 minutos. Engaña al timeout de 15 min de Render.
+        await asyncio.sleep(840)

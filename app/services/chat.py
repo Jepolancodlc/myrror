@@ -7,6 +7,7 @@ import re
 from google import genai
 from google.genai import types
 import redis.asyncio as redis
+from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
 from app.core.prompt import SYSTEM_PROMPT
 from app.db.database import get_profile, get_messages, save_message, get_all_people
@@ -20,6 +21,12 @@ logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 redis_client = redis.from_url(REDIS_URL)
+
+# --- API RESILIENCE SHIELD ---
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
+async def safe_generate_content(*args, **kwargs):
+    """Auto-retry for Gemini API if Google returns 429 (Rate Limit) or network timeouts."""
+    return await client.aio.models.generate_content(*args, **kwargs)
 
 # --- CONTEXT CACHING MANAGER ---
 
@@ -76,7 +83,7 @@ USER'S NEW MESSAGE:
 Respond EXACTLY with a single word: "true" (if crisis) or "false" (if not)."""
 
     try:
-        response = await client.aio.models.generate_content(
+        response = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt
         )
@@ -126,7 +133,7 @@ Respond ONLY with valid JSON.
 """
 
     try:
-        result = await client.aio.models.generate_content(
+        result = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
@@ -441,7 +448,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         if cache_name:
             config_kwargs["cached_content"] = cache_name
             
-        response = await client.aio.models.generate_content(
+        response = await safe_generate_content(
             model=gen_model,
             contents=ctx,
             config=types.GenerateContentConfig(**config_kwargs)
