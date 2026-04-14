@@ -274,6 +274,22 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
             text = text.replace("[MOOD_QUERY]", "").strip()
             markup = get_mood_keyboard()
             
+        # Intercepción de opciones dinámicas (Botones interactivos del LLM)
+        options_match = re.search(r'\[OPTIONS:(.*?)\]', text)
+        if options_match:
+            options_str = options_match.group(1)
+            text = text.replace(options_match.group(0), "").strip()
+            
+            keyboard = []
+            for opt in options_str.split('|'):
+                opt = opt.strip()
+                if opt:
+                    # Truncar a 50 chars para evitar el límite interno de 64 bytes de Telegram
+                    cb_data = f"opt_{opt[:50]}"
+                    keyboard.append([InlineKeyboardButton(opt, callback_data=cb_data)])
+            if keyboard:
+                markup = InlineKeyboardMarkup(keyboard)
+            
         # Safe chunked sending to avoid 4096 character limit in Telegram
         chunk_size = 4000
         for i in range(0, len(text), chunk_size):
