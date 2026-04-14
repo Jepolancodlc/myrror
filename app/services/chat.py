@@ -19,7 +19,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379"
 redis_client = redis.from_url(REDIS_URL)
 
 # --- API RESILIENCE SHIELD ---

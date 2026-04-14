@@ -27,7 +27,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379"
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 redis_client = redis.from_url(REDIS_URL)
 telegram_app = None
