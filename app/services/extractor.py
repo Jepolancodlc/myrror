@@ -354,19 +354,31 @@ async def extract_people(user_id: str, context_type: str, content: str, response
     Extracts mentions of key people in the user's life, deducing power dynamics and relational context.
     """
     user_name = profile.get("name", "the user") if profile else "the user"
+    
+    # Recuperar personas existentes para contexto y evitar duplicados
+    existing_people = await asyncio.to_thread(get_all_people, user_id)
+    existing_names = {p['name'].lower().strip(): p for p in existing_people} if existing_people else {}
+    
+    existing_ctx = ""
+    if existing_people:
+        ep_list = "\n".join([f"- {p['name']} ({p.get('relationship', 'unknown')})" for p in existing_people])
+        existing_ctx = f"\n\nEXISTING PEOPLE IN DATABASE:\n{ep_list}\nCRITICAL: If the person mentioned is already in this list, use their EXACT existing name. Only extract them again if there is NEW information to add."
+
     prompt = f"""You are a people extraction system.
 
 Analyze this conversation and identify any people mentioned by the user.
 
-CONTEXT TYPE: {context_type}
+CONTEXT TYPE: {context_type}{existing_ctx}
 User ({user_name}): "{content[:4000]}"
 MYRROR: "{response[:4000]}"
 
 Only extract REAL people explicitly mentioned or identified in the image/file. 
 CRITICAL RULES:
 1. Do NOT extract the user themselves ({user_name}, "I", "me", "j.", "john") and do NOT extract the AI (MYRROR). Only extract OTHER people in the user's life.
+    1. THE USER'S NAME IS "{user_name}". Do NOT extract the user themselves. If you see the name "{user_name}" (or variations) in the text, chat logs, or files, assume it is the user and IGNORE IT. Do not extract the AI (MYRROR).
 2. If the CONTEXT TYPE is an image or file, use MYRROR's response to deduce if any person was identified or mentioned in it.
 3. Analyze the POWER DYNAMIC. Determine if the relationship is equal, toxic, codependent, or if one seeks validation from the other.
+4. NAME DISAMBIGUATION: If the user says a common name (e.g., "Juan") and your EXISTING PEOPLE list has multiple matches (e.g., "Juan (Boss)" and "Juan T"), use the relationship and story context to deduce EXACTLY which one they mean, and output their full existing name. Never create duplicate fragments of the same person.
 """
     try:
         result = await safe_generate_content(
@@ -381,14 +393,38 @@ CRITICAL RULES:
         if not people or not isinstance(people, list):
             return
 
+        user_name_lower = user_name.lower().strip() if user_name and user_name != "the user" else ""
+        
         for person in people:
             if person.get("name"):
+                person_name_lower = person["name"].lower().strip()
+                
+                # Programmatic safeguard: Intercept and block if the AI tries to save the user as a "Person"
+                if user_name_lower:
+                    if person_name_lower == user_name_lower or user_name_lower in person_name_lower.split() or person_name_lower in user_name_lower.split():
+                        continue
+                
+                relationship = person.get("relationship")
+                notes = person.get("notes") or {}
+
+                # Lógica de Fusión (Merge) para actualizar personas existentes
+                if person_name_lower in existing_names:
+                    old_person = existing_names[person_name_lower]
+                    person["name"] = old_person["name"] # Respetar mayúsculas originales
+                    
+                    if not relationship:
+                        relationship = old_person.get("relationship")
+                        
+                    old_notes = old_person.get("notes") or {}
+                    if isinstance(old_notes, dict) and isinstance(notes, dict):
+                        notes = {**old_notes, **notes} # Combina diccionarios (lo nuevo sobrescribe lo viejo)
+                        
                 await asyncio.to_thread(
                     save_person,
                     user_id=user_id,
                     name=person["name"],
-                    relationship=person.get("relationship") or None,
-                    notes=person.get("notes") or {}
+                    relationship=relationship,
+                    notes=notes
                 )
         if people:
             logger.info(f"Saved {len(people)} people for {user_id}")

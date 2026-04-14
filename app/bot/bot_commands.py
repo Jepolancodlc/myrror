@@ -413,6 +413,7 @@ INSTRUCTIONS:
 """
     try:
         response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
+        response = await safe_generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
         try:
             await status_msg.edit_text(response.text, parse_mode="Markdown")
         except Exception:
@@ -501,6 +502,7 @@ async def flashback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.chat.send_action("typing")
     try:
         response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
+        response = await safe_generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
         await update.message.reply_text(response.text.strip())
     except Exception as e:
         logger.error(f"Flashback error: {e}")

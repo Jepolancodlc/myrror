@@ -190,28 +190,20 @@ def update_episode_embedding(episode_id: str, embedding: list):
     except Exception as e:
         logger.error(f"update_episode_embedding error for {episode_id}: {e}", exc_info=True)
 
-def save_person(user_id: str, name: str, relationship: str = None, notes: dict = {}):
-    """Saves or updates a person in the user's life, merging previous notes with new deductions."""
+def save_person(user_id: str, name: str, relationship: str = None, notes: dict = None):
     try:
-        if not supabase: return
-        existing = supabase.table("people").select("*").eq("user_id", user_id).ilike("name", name).execute()
-        if existing.data:
-            current_notes = existing.data[0].get("notes", {})
-            current_notes.update(notes)
-            supabase.table("people").update({
-                "relationship": relationship,
-                "notes": current_notes,
-                "updated_at": "now()"
-            }).eq("id", existing.data[0]["id"]).execute()
-        else:
-            supabase.table("people").insert({
-                "user_id": user_id,
-                "name": name,
-                "relationship": relationship,
-                "notes": notes
-            }).execute()
+        data = {
+            "user_id": user_id,
+            "name": name,
+            "relationship": relationship,
+            "notes": notes
+        }
+        supabase.table("people").upsert(
+            data, 
+            on_conflict="user_id,name"
+        ).execute()
     except Exception as e:
-        logger.error(f"save_person error for {user_id}: {e}", exc_info=True)
+        logger.error(f"Error saving person: {e}")
 
 def delete_all_user_data(user_id: str):
     """Hard reset: Erases all profiles, messages, episodes, and people for a given user."""
