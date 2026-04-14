@@ -6,10 +6,11 @@ import json
 import re
 from google import genai
 from google.genai import types
+import redis.asyncio as redis
 from dotenv import load_dotenv
 from app.core.prompt import SYSTEM_PROMPT
-from app.db.database import get_profile, get_messages, save_message, get_all_people, search_similar_episodes
-from app.services.extractor import get_profile_for_context, compress_history, run_post_analysis_tasks, parse_json_response
+from app.db.database import get_profile, get_messages, save_message, get_all_people
+from app.services.extractor import get_profile_for_context, compress_history, run_post_analysis_tasks, parse_json_response, get_rag_memories_text
 import random
 from datetime import datetime
 
@@ -17,18 +18,19 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+redis_client = redis.from_url(REDIS_URL)
 
 # --- CONTEXT CACHING MANAGER ---
-_user_caches = {}
 
 async def get_or_create_context_cache(user_id: str, profile: dict, full_history: list) -> str | None:
     """
     Creates a Gemini Context Cache for the static parts of the God Prompt.
     Requires >= 32,768 tokens and a compatible model (e.g., gemini-1.5-flash-002).
     """
-    now = datetime.now().timestamp()
-    if user_id in _user_caches and _user_caches[user_id]["expires_at"] > now:
-        return _user_caches[user_id]["name"]
+    cached_name = await redis_client.get(f"gemini_cache:{user_id}")
+    if cached_name:
+        return cached_name.decode('utf-8')
 
     static_instruction = f"{SYSTEM_PROMPT}\n\nCOMPLETE USER PROFILE:\n{json.dumps(profile, ensure_ascii=False)}"
     history_text = "\n".join([f"{'User' if m['role'] == 'user' else 'MYRROR'}: {m['content']}" for m in full_history])
@@ -42,7 +44,8 @@ async def get_or_create_context_cache(user_id: str, profile: dict, full_history:
                 ttl="3600s" # Keeps the cache alive for 1 hour
             )
         )
-        _user_caches[user_id] = {"name": cache.name, "expires_at": now + 3300}
+        # Save in Redis with an expiration slightly shorter than Gemini's TTL (3300s = 55m)
+        await redis_client.set(f"gemini_cache:{user_id}", cache.name, ex=3300)
         logger.info(f"Context Cache created for {user_id}: {cache.name}")
         return cache.name
     except Exception as e:
@@ -290,7 +293,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
             if humor: ctx += f"\n- Their Humor Style: {humor}"
             if tone: ctx += f"\n- Their Preferred Tone: {tone}"
             if cognition: ctx += f"\n- Their Cognition Style: {cognition} (Structure your arguments to fit how their brain processes reality. E.g., if logical, use facts/frameworks; if emotional, focus on resonance)."
-            ctx += "\nModify your vocabulary, sentence length, and warmth to match this perfectly. Mirror their energy. If they text casually (e.g., lowercase, missing punctuation), match their texting style."
+            ctx += "\nTYPOGRAPHIC MIRRORING: Modify your vocabulary and formatting to match theirs perfectly. Mirror their energy. If they text casually (e.g., all lowercase, missing punctuation, short bursts), you MUST match that texting style. If they are highly formal, be formal."
             
         job = profile.get("job")
         skills = profile.get("skills")
@@ -390,31 +393,9 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
             # HYPER-PRECISE RAG: Combine the high-level conversation summary with the raw message
             embed_text = f"Context: {conv_ctx}\nMessage: {content}"
             embed_text = embed_text if len(embed_text) <= 8000 else embed_text[:8000]
-            
-            emb_res = await client.aio.models.embed_content(
-                model="text-embedding-004",
-                contents=embed_text
-            )
-            if emb_res.embeddings:
-                query_embedding = emb_res.embeddings[0].values
-                relevant_episodes = await asyncio.to_thread(search_similar_episodes, user_id, query_embedding, limit=3)
-                
-                if relevant_episodes:
-                    eps_list = []
-                    now_date = datetime.now().date()
-                    for ep in relevant_episodes:
-                        ep_date_str = ep.get('created_at', '')[:10]
-                        try:
-                            ep_date = datetime.strptime(ep_date_str, "%Y-%m-%d").date()
-                            days_ago = (now_date - ep_date).days
-                            if days_ago == 0: time_ctx = "today"
-                            elif days_ago == 1: time_ctx = "yesterday"
-                            elif days_ago > 90: time_ctx = "a long time ago"
-                            else: time_ctx = f"{days_ago} days ago"
-                        except:
-                            time_ctx = ep_date_str
-                        eps_list.append(f"- [{time_ctx}] {ep.get('event')}")
-                    memory_block.append(f"RELEVANT PAST MEMORIES (Triggered by the user's message):\n{chr(10).join(eps_list)}\nSTEALTH MEMORY: Use these invisibly. Sound like a human who just remembered something naturally. Draw advice from their OWN past track record.")
+            eps_text = await get_rag_memories_text(user_id, embed_text)
+            if eps_text:
+                memory_block.append(f"RELEVANT PAST MEMORIES (Triggered by the user's message):\n{eps_text}\nSTEALTH MEMORY: Use these invisibly. Sound like a human who just remembered something naturally. Draw advice from their OWN past track record.")
         except Exception as e:
             logger.error(f"RAG search error for {user_id}: {e}", exc_info=True)
 

@@ -9,7 +9,7 @@ import random
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from app.db.database import get_profile, save_profile, save_episode, save_person, get_all_people, save_message, get_episodes, get_user_lock, get_messages
+from app.db.database import get_profile, save_profile, save_episode, save_person, get_all_people, save_message, get_episodes, get_user_lock, get_messages, search_similar_episodes
 from app.models.schemas import PersonSchema, ProfileSchema, EpisodeSchema
 from datetime import datetime
 
@@ -785,3 +785,35 @@ async def run_post_analysis_tasks(user_id: str, context_type: str, content: str,
         )
     except Exception as e:
         logger.error(f"Post-analysis tasks error for {user_id}: {e}", exc_info=True)
+
+async def get_rag_memories_text(user_id: str, query_text: str) -> str:
+    """Extrae y formatea recuerdos semánticos (RAG) centralizando la lógica para cumplir DRY."""
+    if not query_text or (len(query_text.split()) <= 3 and len(query_text) <= 15):
+        return ""
+    try:
+        emb_res = await client.aio.models.embed_content(
+            model="text-embedding-004",
+            contents=query_text[:8000]
+        )
+        if not emb_res.embeddings:
+            return ""
+        
+        relevant_episodes = await asyncio.to_thread(search_similar_episodes, user_id, emb_res.embeddings[0].values, limit=3)
+        if not relevant_episodes:
+            return ""
+            
+        eps_list = []
+        now_date = datetime.now().date()
+        for ep in relevant_episodes:
+            ep_date_str = ep.get('created_at', '')[:10]
+            try:
+                ep_date = datetime.strptime(ep_date_str, "%Y-%m-%d").date()
+                days_ago = (now_date - ep_date).days
+                time_ctx = "today" if days_ago == 0 else ("yesterday" if days_ago == 1 else f"{days_ago} days ago")
+            except Exception:
+                time_ctx = ep_date_str
+            eps_list.append(f"- [{time_ctx}] {ep.get('event')}")
+        return "\n".join(eps_list)
+    except Exception as e:
+        logger.error(f"RAG search error for {user_id}: {e}", exc_info=True)
+        return ""

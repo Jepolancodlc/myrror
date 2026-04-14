@@ -55,6 +55,10 @@ async def localize(user_id: str, text: str, profile: dict = None) -> str:
     if text in translation_cache[lang_key]:
         return translation_cache[lang_key][text]
 
+    # Límite FIFO para prevenir fuga de memoria a largo plazo
+    if len(translation_cache[lang_key]) > 1000:
+        translation_cache[lang_key].pop(next(iter(translation_cache[lang_key])))
+
     prompt = f"""Translate the following text to {language}.
 CRITICAL: Maintain the exact same formatting, Markdown, and emojis. Do NOT add any conversational text. Return ONLY the translated text.
 

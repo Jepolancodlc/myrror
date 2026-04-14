@@ -3,9 +3,9 @@ import logging
 import asyncio
 import random
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from google import genai
-from app.db.database import get_all_profiles, get_null_episodes, update_episode_embedding, supabase, save_message, get_user_lock, get_profile, save_profile
+from app.db.database import get_null_episodes, update_episode_embedding, supabase, save_message, get_user_lock, get_profile, save_profile
 from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
@@ -48,8 +48,21 @@ async def _process_user_checkin(context, user_id, data, days_silent, thresholds,
 
 async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
     """Checks if users have been silent for 3+ days and reaches out to them."""
-    profiles = await asyncio.to_thread(get_all_profiles)
     now = datetime.now()
+    
+    # Query delegada a Supabase: Solo traer perfiles inactivos por al menos 2 días (umbral mínimo)
+    cutoff_date = (now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M")
+    try:
+        response = await asyncio.to_thread(
+            lambda: supabase.table("profiles")
+            .select("user_id, data")
+            .lte("data->>last_conversation", cutoff_date)
+            .execute()
+        )
+        profiles = response.data or []
+    except Exception as e:
+        logger.error(f"Proactive job db error: {e}")
+        return
     
     for p in profiles:
         user_id = p["user_id"]
@@ -81,9 +94,19 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def daily_maintenance_job(context: ContextTypes.DEFAULT_TYPE):
     """Runs daily to self-heal the semantic memory (generate missing embeddings)."""
-    profiles = await asyncio.to_thread(get_all_profiles)
-    for p in profiles:
-        user_id = p["user_id"]
+    # Query delegada a Supabase: Extraer IDs únicos que realmente necesitan reparación
+    try:
+        response = await asyncio.to_thread(
+            lambda: supabase.table("episodes").select("user_id").is_("embedding", "null").execute()
+        )
+        if not response.data: 
+            return
+        user_ids = set(row["user_id"] for row in response.data)
+    except Exception as e:
+        logger.error(f"Maintenance job db error: {e}")
+        return
+        
+    for user_id in user_ids:
         episodes = await asyncio.to_thread(get_null_episodes, user_id)
         if not episodes: continue
         

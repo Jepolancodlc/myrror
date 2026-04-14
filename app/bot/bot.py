@@ -10,6 +10,7 @@ import re
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+import redis.asyncio as redis
 from dotenv import load_dotenv
 from app.db.database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile, delete_user_messages
 from app.services.chat import get_response
@@ -26,12 +27,9 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-user_sessions = {}
-user_pending = {}
-user_message_buffers = {}
-user_quiz_options = {}
+redis_client = redis.from_url(REDIS_URL)
 telegram_app = None
 
 _bg_tasks = set()
@@ -59,7 +57,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         profile["language"] = update.effective_user.language_code
         await asyncio.to_thread(save_profile, user_id, profile)
 
-    user_sessions[user_id] = True
+    await redis_client.set(f"session:{user_id}", "1", ex=86400)
     await asyncio.to_thread(delete_user_messages, user_id)
     welcome_text = (
         "Hello. I am MYRROR.\n\n"
@@ -98,7 +96,7 @@ User Profile: {json.dumps(profile)}"""
         for i, opt in enumerate(data["options"]):
             keyboard.append([InlineKeyboardButton(opt[:50] + ("..." if len(opt)>50 else ""), callback_data=f"quiz_{i}")])
         
-        user_quiz_options[user_id] = data["options"]
+        await redis_client.set(f"quiz:{user_id}", json.dumps(data["options"]), ex=3600)
         await update.message.reply_text(f"🧠 **MYRROR Test**\n\n{data['question']}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Quiz error: {e}")
@@ -112,13 +110,27 @@ async def quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     idx = int(query.data.split("_")[1])
     
     # Memory Leak Fix: Pop to free up RAM after user answers
-    options = user_quiz_options.pop(user_id, [])
+    raw_options = await redis_client.getdel(f"quiz:{user_id}")
+    options = json.loads(raw_options.decode('utf-8')) if raw_options else []
+    
     chosen = options[idx] if idx < len(options) else "An unknown option"
     
     msg_chose = await localize(user_id, "✅ **You chose:**")
     await query.edit_message_text(text=f"{query.message.text}\n\n{msg_chose} {chosen}", parse_mode="Markdown")
     
     content = f"[Quiz Answer] I chose: {chosen}"
+    await process_message(update, context, user_id, content, False)
+
+async def dynamic_option_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+    chosen = query.data[4:] # remove "opt_"
+    
+    msg_chose = await localize(user_id, "✅ **You chose:**")
+    await query.edit_message_text(text=f"{query.message.text}\n\n{msg_chose} {chosen}", parse_mode="Markdown")
+    
+    content = f"[Option selected] {chosen}"
     await process_message(update, context, user_id, content, False)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -200,10 +212,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str, content: str, is_new_session: bool):
+    message = update.effective_message
+    # 1. HUMAN READING SIMULATION: Wait a few seconds reading the user's text before "typing"
+    # Average reading speed is ~150 chars per second. Max reading pause of 3 seconds.
+    reading_delay = min(len(content) / 150.0, 3.0) + random.uniform(0.2, 0.8)
+    await asyncio.sleep(reading_delay)
+
     async def keep_typing():
         try:
             while True:
-                await update.message.chat.send_action("typing")
+                await message.chat.send_action("typing")
                 await asyncio.sleep(4) # Refresh typing action before Telegram's 5s timeout
         except asyncio.CancelledError:
             pass
@@ -231,14 +249,22 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
         
         # Dynamic typing simulation based on mood (slower when sad, faster when energetic)
         mood = profile.get("current_mood_score", 5)
+        comm_style = str(profile.get("communication_style", "")).lower()
         speed_chars_per_sec = 80.0
+        
+        if "fast" in comm_style or "rapid" in comm_style or "burst" in comm_style:
+            speed_chars_per_sec += 25.0
+        elif "slow" in comm_style or "thoughtful" in comm_style or "reflective" in comm_style:
+            speed_chars_per_sec -= 20.0
+            
         if mood and isinstance(mood, (int, float)):
             if mood <= 4:
-                speed_chars_per_sec = 50.0  # Slower, delicate typing
+                speed_chars_per_sec -= 30.0  # Slower, delicate typing
             elif mood >= 7:
-                speed_chars_per_sec = 100.0 # Faster, energetic typing
+                speed_chars_per_sec += 30.0 # Faster, energetic typing
                 
-        # Añade varianza aleatoria humana (entre 0.1 y 0.7 segundos extra)
+        speed_chars_per_sec = max(speed_chars_per_sec, 30.0) # Prevent impossibly slow typing
+        # Add human random variance
         typing_delay = min(len(text) / speed_chars_per_sec, 4.0) + random.uniform(0.1, 0.7)
         await asyncio.sleep(typing_delay)
         
@@ -254,15 +280,15 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
             chunk = text[i:i+chunk_size]
             try:
                 if i + chunk_size >= len(text) and markup:
-                    await update.message.reply_text(chunk, reply_markup=markup, parse_mode="Markdown")
+                    await message.reply_text(chunk, reply_markup=markup, parse_mode="Markdown")
                 else:
-                    await update.message.reply_text(chunk, parse_mode="Markdown")
+                    await message.reply_text(chunk, parse_mode="Markdown")
             except Exception as e:
                 logger.warning(f"Markdown parse failed, falling back to plain text: {e}")
                 if i + chunk_size >= len(text) and markup:
-                    await update.message.reply_text(chunk, reply_markup=markup)
+                    await message.reply_text(chunk, reply_markup=markup)
                 else:
-                    await update.message.reply_text(chunk)
+                    await message.reply_text(chunk)
 
         if is_first_today:
             # Daily summary of yesterday
@@ -283,7 +309,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
     except Exception as e:
         logger.error(f"Message processing error for {user_id}: {e}", exc_info=True)
         msg_err = await localize(user_id, "I'm having trouble thinking right now. Try again in a moment.")
-        await update.message.reply_text(msg_err)
+        await message.reply_text(msg_err)
     finally:
         typing_task.cancel()
 
@@ -305,24 +331,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(content) < 2:
         return
 
-    # Add message to the user's temporary burst buffer
-    if user_id not in user_message_buffers:
-        user_message_buffers[user_id] = []
-    user_message_buffers[user_id].append(content)
+    current_time = time.time()
+    
+    # Almacenar en Redis y refrescar marca de tiempo
+    await redis_client.rpush(f"buffer:{user_id}", content)
+    await redis_client.expire(f"buffer:{user_id}", 300) # Prevenir orphans tras 5 min
+    await redis_client.set(f"last_msg:{user_id}", current_time, ex=300)
 
-    if user_id in user_pending:
-        user_pending[user_id].cancel()
-
-    async def debounced():
+    async def debounced(eval_time):
         try:
             await asyncio.sleep(cooldown)
             
+            # Distributed Debouncer: Revisar si llegó un mensaje más nuevo
+            last_msg_time = float(await redis_client.get(f"last_msg:{user_id}") or 0)
+            if last_msg_time > eval_time:
+                return # Hay una tarea más reciente que manejará esto
+            
             await update.message.chat.send_action("typing")
             
-            is_new_session = user_sessions.pop(user_id, False)
-            combined_content = "\n".join(user_message_buffers[user_id])
-            is_burst = len(user_message_buffers[user_id]) > 2
-            user_message_buffers[user_id] = [] # Clear the buffer for the next round of messages
+            # Somos la tarea ganadora. Extraer datos atómicamente de Redis.
+            pipe = redis_client.pipeline()
+            pipe.lrange(f"buffer:{user_id}", 0, -1)
+            pipe.delete(f"buffer:{user_id}")
+            pipe.getdel(f"session:{user_id}")
+            results = await pipe.execute()
+            
+            messages = [m.decode('utf-8') for m in results[0]] if results[0] else []
+            is_new_session = bool(results[2])
+            
+            if not messages:
+                return
+                
+            combined_content = "\n".join(messages)
+            is_burst = len(messages) > 2
             
             final_content = combined_content
             if is_burst:
@@ -331,11 +372,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await process_message(update, context, user_id, final_content, is_new_session)
         except asyncio.CancelledError:
             pass
-        finally:
-            if user_pending.get(user_id) == asyncio.current_task():
-                del user_pending[user_id]
 
-    user_pending[user_id] = asyncio.create_task(debounced())
+    task = asyncio.create_task(debounced(current_time))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # BOT STARTUP
@@ -349,6 +389,7 @@ async def start_telegram_bot():
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("quiz", quiz_command))
     telegram_app.add_handler(CallbackQueryHandler(quiz_callback, pattern="^quiz_"))
+    telegram_app.add_handler(CallbackQueryHandler(dynamic_option_callback, pattern="^opt_"))
     telegram_app.add_handler(CallbackQueryHandler(mood_callback, pattern="^mood_"))
     telegram_app.add_handler(CommandHandler("help", help_command))
     telegram_app.add_handler(CommandHandler("dossier", dossier_command))
@@ -391,3 +432,4 @@ async def stop_telegram_bot():
             await telegram_app.updater.stop()
         await telegram_app.stop()
         await telegram_app.shutdown()
+    await redis_client.aclose()

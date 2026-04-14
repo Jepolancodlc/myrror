@@ -8,8 +8,8 @@ import re
 from google import genai
 from dotenv import load_dotenv
 from app.core.prompt import SYSTEM_PROMPT
-from app.db.database import get_profile, save_message, get_messages, search_similar_episodes
-from app.services.extractor import get_profile_for_context
+from app.db.database import get_profile, save_message, get_messages
+from app.services.extractor import get_profile_for_context, get_rag_memories_text
 
 load_dotenv()
 
@@ -33,29 +33,13 @@ async def analyze_image(user_id: str, file_bytes: bytearray, caption: str) -> st
 
     if caption and (len(caption.split()) > 3 or len(caption) > 15):
         try:
-            emb_res = await client.aio.models.embed_content(
-                model="text-embedding-004",
-                contents=caption[:8000]
-            )
-            if emb_res.embeddings:
-                relevant_episodes = await asyncio.to_thread(search_similar_episodes, user_id, emb_res.embeddings[0].values, limit=3)
-                if relevant_episodes:
-                    eps_list = []
-                    now_date = datetime.now().date()
-                    for ep in relevant_episodes:
-                        ep_date_str = ep.get('created_at', '')[:10]
-                        try:
-                            ep_date = datetime.strptime(ep_date_str, "%Y-%m-%d").date()
-                            days_ago = (now_date - ep_date).days
-                            time_ctx = "today" if days_ago == 0 else ("yesterday" if days_ago == 1 else f"{days_ago} days ago")
-                        except:
-                            time_ctx = ep_date_str
-                        eps_list.append(f"- [{time_ctx}] {ep.get('event')}")
-                    eps_text = "\n".join(eps_list)
-                    history_text += f"\n\nRELEVANT PAST MEMORIES (Triggered by the image caption):\n{eps_text}\nSTEALTH MEMORY: If these memories connect to the image, bring them up naturally like a friend remembering a past detail. Never say 'I found a memory in my database'."
+            eps_text = await get_rag_memories_text(user_id, caption)
+            if eps_text:
+                history_text += f"\n\nRELEVANT PAST MEMORIES (Triggered by the image caption):\n{eps_text}\nSTEALTH MEMORY: If these memories connect to the image, bring them up naturally like a friend remembering a past detail. Never say 'I found a memory in my database'."
         except Exception as e:
             logger.error(f"RAG search error for {user_id} in image: {e}")
 
+    mood = profile.get("current_mood_score", "unknown")
     try:
         response = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
@@ -64,6 +48,7 @@ async def analyze_image(user_id: str, file_bytes: bytearray, caption: str) -> st
                     "parts": [
                         {"text": (
                             f"{SYSTEM_PROMPT}\n\nWHAT YOU KNOW ABOUT THIS USER:\n{profile_ctx}{history_text}\n\n"
+                            f"USER'S CURRENT MOOD SCORE: {mood}/10. Adapt your emotional tone to respect their current state.\n\n"
                             f"The user sent an image with this message: '{caption}'\n\n"
                             "INSTRUCTIONS:\n"
                             "1. Analyze the image as MYRROR. Look beyond the obvious.\n"
@@ -108,26 +93,9 @@ async def analyze_document(user_id: str, file_bytes: bytearray, mime: str, filen
     query_text = caption if caption and (len(caption.split()) > 3 or len(caption) > 15) else filename
     if query_text:
         try:
-            emb_res = await client.aio.models.embed_content(
-                model="text-embedding-004",
-                contents=query_text[:8000]
-            )
-            if emb_res.embeddings:
-                relevant_episodes = await asyncio.to_thread(search_similar_episodes, user_id, emb_res.embeddings[0].values, limit=3)
-                if relevant_episodes:
-                    eps_list = []
-                    now_date = datetime.now().date()
-                    for ep in relevant_episodes:
-                        ep_date_str = ep.get('created_at', '')[:10]
-                        try:
-                            ep_date = datetime.strptime(ep_date_str, "%Y-%m-%d").date()
-                            days_ago = (now_date - ep_date).days
-                            time_ctx = "today" if days_ago == 0 else ("yesterday" if days_ago == 1 else f"{days_ago} days ago")
-                        except:
-                            time_ctx = ep_date_str
-                        eps_list.append(f"- [{time_ctx}] {ep.get('event')}")
-                    eps_text = "\n".join(eps_list)
-                    history_text += f"\n\nRELEVANT PAST MEMORIES (Triggered by the document/caption):\n{eps_text}\nSTEALTH MEMORY: If these memories connect to the document, bring them up naturally like a friend remembering a past detail. Never say 'I found a memory in my database'."
+            eps_text = await get_rag_memories_text(user_id, query_text)
+            if eps_text:
+                history_text += f"\n\nRELEVANT PAST MEMORIES (Triggered by the document/caption):\n{eps_text}\nSTEALTH MEMORY: If these memories connect to the document, bring them up naturally like a friend remembering a past detail. Never say 'I found a memory in my database'."
         except Exception as e:
             logger.error(f"RAG search error for {user_id} in document: {e}")
 
@@ -137,6 +105,7 @@ async def analyze_document(user_id: str, file_bytes: bytearray, mime: str, filen
             if len(file_content) > 500000:
                 file_content = file_content[:500000] + "\n\n[File truncated]"
 
+            mood = profile.get("current_mood_score", "unknown")
             analysis_prompt = f"""{SYSTEM_PROMPT}
 
 WHAT YOU KNOW ABOUT THIS USER:
@@ -144,6 +113,7 @@ WHAT YOU KNOW ABOUT THIS USER:
 
 The user sent a file.
 
+USER'S CURRENT MOOD SCORE: {mood}/10. Adapt your emotional tone to respect their current state.
 FILE CONTENT:
 {file_content}
 User's message: "{caption}"
@@ -162,6 +132,7 @@ INSTRUCTIONS:
             )
 
         elif mime == "application/pdf" or mime.startswith("image/"):
+            mood = profile.get("current_mood_score", "unknown")
             file_base64 = base64.b64encode(file_bytes).decode("utf-8")
             response = await client.aio.models.generate_content(
                 model="gemini-3.1-flash-lite-preview",
@@ -170,6 +141,7 @@ INSTRUCTIONS:
                         "parts": [
                             {"text": (
                                 f"{SYSTEM_PROMPT}\n\nWHAT YOU KNOW ABOUT THIS USER:\n{profile_ctx}{history_text}\n\n"
+                                f"USER'S CURRENT MOOD SCORE: {mood}/10. Adapt your emotional tone to respect their current state.\n\n"
                                 f"User message: '{caption}'\n\n"
                                 "INSTRUCTIONS:\n"
                                 "1. Detect the document type and read its contents carefully.\n"
