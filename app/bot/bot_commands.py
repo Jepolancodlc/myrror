@@ -7,7 +7,7 @@ import random
 import math
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from app.db.database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile, get_user_lock
+from app.db.database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile, get_user_lock, delete_all_user_data
 from app.services.extractor import track_evolution, generate_weekly_summary
 from google import genai
 from datetime import datetime
@@ -71,7 +71,7 @@ TEXT TO TRANSLATE:
 
 async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    profile = await asyncio.to_thread(get_profile, user_id)
+    profile = await asyncio.to_thread(get_profile, user_id) or {}
     evolution = profile.get("evolution", [])
 
     mood_data = [e for e in evolution if e.get("field") == "current_mood_score"]
@@ -86,12 +86,14 @@ async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import matplotlib.pyplot as plt
         import io
         
-        dates = [e["date"][5:] for e in mood_data[-14:]]
-        scores = [float(str(e["to"]).replace(',', '.')) for e in mood_data[-14:] if str(e["to"]).replace('.', '', 1).isdigit()]
+        # FIX: Ensure dates and scores align perfectly by filtering together
+        valid_moods = [e for e in mood_data[-14:] if str(e.get("to", "")).replace(',', '.').replace('.', '', 1).isdigit()]
+        dates = [e["date"][5:] for e in valid_moods]
+        scores = [float(str(e["to"]).replace(',', '.')) for e in valid_moods]
 
         fig = plt.figure(figsize=(8, 4))
         ax = fig.add_subplot(111)
-        ax.plot(dates[:len(scores)], scores, marker='o', color='#4A90E2', linestyle='-', linewidth=2)
+        ax.plot(dates, scores, marker='o', color='#4A90E2', linestyle='-', linewidth=2)
         ax.set_ylim(0, 10)
         ax.set_title("Your Emotional Evolution")
         ax.set_ylabel("Mood Score (1-10)")
@@ -295,7 +297,7 @@ async def setcompass_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
         
     async with get_user_lock(user_id):
-        profile = await asyncio.to_thread(get_profile, user_id)
+        profile = await asyncio.to_thread(get_profile, user_id) or {}
         profile["life_compass"] = compass_text
         await asyncio.to_thread(save_profile, user_id, profile)
     msg = await localize(user_id, "🧭 **Life Compass Updated**\n\nI have anchored this to your core profile. I will use it to guide you back when you feel lost.", profile)
@@ -306,7 +308,7 @@ async def setcompass_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def evolution_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    profile = await asyncio.to_thread(get_profile, user_id)
+    profile = await asyncio.to_thread(get_profile, user_id) or {}
     evolution = profile.get("evolution", [])
     if not evolution:
         msg = await localize(user_id, "No changes tracked yet. Keep talking to me.", profile)
@@ -418,7 +420,7 @@ INSTRUCTIONS:
 
 async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    profile = await asyncio.to_thread(get_profile, user_id)
+    profile = await asyncio.to_thread(get_profile, user_id) or {}
     messages = await asyncio.to_thread(get_messages, user_id, 40)
     episodes = await asyncio.to_thread(get_episodes, user_id, limit=20)
     if not profile and not messages:
@@ -455,7 +457,7 @@ async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def contract_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    profile = await asyncio.to_thread(get_profile, user_id)
+    profile = await asyncio.to_thread(get_profile, user_id) or {}
     contracts = profile.get("personal_contracts", None)
     if not contracts:
         msg = await localize(user_id, "No personal contracts yet.\n\nTell me something like:\n'Don't let me justify skipping the gym'\nI'll remember and enforce it.", profile)
@@ -482,7 +484,7 @@ async def flashback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     episode = random.choice(valid_episodes)
     event = episode.get("event", "")
     date = episode.get("created_at", "")[:10]
-    profile = await asyncio.to_thread(get_profile, user_id)
+    profile = await asyncio.to_thread(get_profile, user_id) or {}
     cognition = profile.get("cognition_style", "Balanced")
     tastes = profile.get("media_and_tastes")
     

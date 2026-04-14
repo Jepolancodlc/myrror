@@ -4,6 +4,7 @@ import os
 import base64
 import asyncio
 from datetime import datetime
+import re
 from google import genai
 from dotenv import load_dotenv
 from app.core.prompt import SYSTEM_PROMPT
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 async def analyze_image(user_id: str, file_bytes: bytearray, caption: str) -> str:
-    profile = await asyncio.to_thread(get_profile, user_id)
+    profile = await asyncio.to_thread(get_profile, user_id) or {}
     profile_ctx = get_profile_for_context(profile, caption)
     image_base64 = base64.b64encode(file_bytes).decode("utf-8")
 
@@ -79,6 +80,10 @@ async def analyze_image(user_id: str, file_bytes: bytearray, caption: str) -> st
             ]
         )
         text = response.text
+        
+        text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL).strip()
+        if not text: text = "..."
+        
         await asyncio.to_thread(save_message, user_id, "user", f"[Image] {caption}")
         await asyncio.to_thread(save_message, user_id, "assistant", text)
         return text
@@ -87,7 +92,7 @@ async def analyze_image(user_id: str, file_bytes: bytearray, caption: str) -> st
         raise
 
 async def analyze_document(user_id: str, file_bytes: bytearray, mime: str, filename: str, caption: str) -> str | None:
-    profile = await asyncio.to_thread(get_profile, user_id)
+    profile = await asyncio.to_thread(get_profile, user_id) or {}
     profile_ctx = get_profile_for_context(profile, caption)
 
     recent_history = await asyncio.to_thread(get_messages, user_id, 6)
@@ -182,6 +187,10 @@ INSTRUCTIONS:
             return None
 
         text = response.text
+        
+        text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL).strip()
+        if not text: text = "..."
+        
         await asyncio.to_thread(save_message, user_id, "user", f"[File: {filename}] {caption}")
         await asyncio.to_thread(save_message, user_id, "assistant", text)
         return text

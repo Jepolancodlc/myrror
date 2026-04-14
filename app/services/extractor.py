@@ -2,6 +2,7 @@
 import logging
 import json
 import os
+import re
 import copy
 import asyncio
 import random
@@ -111,14 +112,18 @@ def parse_json_response(text: str):
     Sanitizes markdown blocks (e.g., ```json) in Gemini responses and safely parses them into a dict.
     """
     try:
-        clean = text.strip()
-        if clean.startswith("```json"):
-            clean = clean.split("```json", 1)
-        elif clean.startswith("```"):
-            clean = clean.split("```", 1)[1]
-        if clean.endswith("```"):
-            clean = clean.rsplit("```", 1)[0]
-        return json.loads(clean.strip())
+        # Regex to robustly capture anything between markdown backticks
+        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text, re.IGNORECASE)
+        if match:
+            clean = match.group(1).strip()
+        else:
+            # Extreme fallback: locate the raw curly/square braces if markdown is completely missing
+            clean = text.strip()
+            start_idx = min([idx for idx in [clean.find('{'), clean.find('[')] if idx >= 0] + [len(clean)])
+            end_idx = max(clean.rfind('}'), clean.rfind(']')) + 1
+            if start_idx < end_idx:
+                clean = clean[start_idx:end_idx]
+        return json.loads(clean)
     except Exception as e:
         logger.error(f"JSON parse error: {e} | Text: {text[:200]}")
         return None
@@ -227,7 +232,7 @@ def track_evolution(profile: dict, new_data: dict) -> list:
     return evolution
 
 def update_confidence(profile: dict, new_data: dict, source: str) -> dict:
-    confidence_map = profile.get("confidence", {})
+    confidence_map = profile.get("confidence") or {}
     confidence_level = "high" if source == "explicit" else "medium"
     now = datetime.now().strftime("%Y-%m-%d")
 
@@ -393,10 +398,11 @@ async def extract_and_save_profile(user_id: str, context_type: str, content: str
     """
     Core Extraction Engine: Updates the user's 'Psychological Dossier' based on implicit/explicit behavior. Uses Locks to prevent Race Conditions.
     """
+    light_profile = {k: v for k, v in profile.items() if k not in ["evolution", "confidence", "history_cache"] and v}
     prompt = f"""You are the most advanced profile extraction system ever built.
 
 CONTEXT TYPE: {context_type}
-CURRENT PROFILE: {json.dumps(profile, ensure_ascii=False, separators=(',', ':'))}
+CURRENT PROFILE: {json.dumps(light_profile, ensure_ascii=False, separators=(',', ':'))}
 
 INTERACTION:
 User: "{content[:4000]}"
@@ -429,6 +435,7 @@ RULES:
 - Update the 'interaction_manual': a living set of rules on EXACTLY how MYRROR must speak to this specific user to bypass their psychological defenses based on what works and what fails.
 - AI CORRECTION & BOUNDARIES: If the user corrects MYRROR, gets annoyed by a response, or says "that's not what I meant", IMMEDIATELY update 'failed_advice' and 'interaction_manual' so MYRROR learns exactly what to avoid next time.
 - Never invent.
+- TOKEN OPTIMIZATION: Keep ALL lists concise (max 5-7 most critical items). Discard older or less relevant traits to save space.
 - Keep ALL existing fields UNLESS they are explicitly no longer true (e.g., a solved fear, a changed goal).
 """
 
@@ -448,15 +455,17 @@ RULES:
         # Schema Safety: Strip out null values from Pydantic response to avoid overwriting data with empty fields
         new_data = {k: v for k, v in new_data.items() if v is not None}
 
-        old_evolution_len = len(profile.get("evolution") or [])
-        evolution = track_evolution(profile, new_data)
-        new_shifts = evolution[old_evolution_len:]
         source = new_data.pop("data_source", "inferred")
-        confidence = update_confidence(profile, new_data, source)
 
         # MUTEX LOCK: Enforces thread safety, preventing concurrent profile modifications and data corruption.
         async with get_user_lock(user_id):
             current_db_profile = await asyncio.to_thread(get_profile, user_id)
+            
+            old_evolution_len = len(current_db_profile.get("evolution") or [])
+            evolution = track_evolution(current_db_profile, new_data)
+            new_shifts = evolution[old_evolution_len:]
+            confidence = update_confidence(current_db_profile, new_data, source)
+            
             updated = deep_merge(current_db_profile, new_data)
             updated["evolution"] = evolution
             updated["confidence"] = confidence
@@ -570,11 +579,13 @@ async def generate_weekly_summary(user_id: str, profile: dict, messages: list, e
         if not ep.get("event", "").startswith("Daily summary")
         and not ep.get("event", "").startswith("Weekly summary")
     ]) or "No significant episodes this week."
+    
+    light_profile = {k: v for k, v in profile.items() if k not in ["evolution", "confidence", "history_cache"] and v}
 
     language = profile.get("language", "the user's language")
     prompt = f"""Generate an honest weekly reflection for this person.
 
-PROFILE: {json.dumps(profile, ensure_ascii=False, separators=(',', ':'))}
+PROFILE: {json.dumps(light_profile, ensure_ascii=False, separators=(',', ':'))}
 
 THIS WEEK'S CONVERSATIONS:
 {conversation}
@@ -640,9 +651,11 @@ async def generate_daily_summary(user_id: str, profile: dict, messages: list):
         f"{'User' if m['role'] == 'user' else 'MYRROR'}: {m['content'][:150]}"
         for m in messages[-20:]
     ])
+    
+    light_profile = {k: v for k, v in profile.items() if k not in ["evolution", "confidence", "history_cache"] and v}
     prompt = f"""Summarize what was learned about this person today.
 
-PROFILE: {json.dumps(profile, ensure_ascii=False, separators=(',', ':'))}
+PROFILE: {json.dumps(light_profile, ensure_ascii=False, separators=(',', ':'))}
 CONVERSATION: {conversation}
 
 3 sentences max. Third person. Specific.

@@ -211,7 +211,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
     typing_task = asyncio.create_task(keep_typing())
 
     try:
-        profile = await asyncio.to_thread(get_profile, user_id)
+        profile = await asyncio.to_thread(get_profile, user_id) or {}
 
         # Check if first message of the day
         last = profile.get("last_conversation", "")
@@ -225,9 +225,9 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
 
         text = await get_response(user_id, content, is_new_session)
         
-        # Remove the AI's internal monologue (Chain of Thought) before showing it to the user
-        # Using regex to match <thought>...</thought> blocks (including newlines)
-        text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL).strip()
+        # Fallback in case the LLM hallucinates an empty response or only outputs a thought block
+        if not text:
+            text = "..."
         
         # Dynamic typing simulation based on mood (slower when sad, faster when energetic)
         mood = profile.get("current_mood_score", 5)

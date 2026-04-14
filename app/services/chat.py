@@ -2,6 +2,8 @@
 import logging
 import os
 import asyncio
+import json
+import re
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -15,6 +17,38 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# --- CONTEXT CACHING MANAGER ---
+_user_caches = {}
+
+async def get_or_create_context_cache(user_id: str, profile: dict, full_history: list) -> str | None:
+    """
+    Creates a Gemini Context Cache for the static parts of the God Prompt.
+    Requires >= 32,768 tokens and a compatible model (e.g., gemini-1.5-flash-002).
+    """
+    now = datetime.now().timestamp()
+    if user_id in _user_caches and _user_caches[user_id]["expires_at"] > now:
+        return _user_caches[user_id]["name"]
+
+    static_instruction = f"{SYSTEM_PROMPT}\n\nCOMPLETE USER PROFILE:\n{json.dumps(profile, ensure_ascii=False)}"
+    history_text = "\n".join([f"{'User' if m['role'] == 'user' else 'MYRROR'}: {m['content']}" for m in full_history])
+    
+    try:
+        cache = await client.aio.caches.create(
+            model="gemini-1.5-flash-002", # 3.1-flash-lite-preview does not support caching
+            config=types.CreateCacheConfig(
+                system_instruction=static_instruction,
+                contents=[history_text] if history_text else ["No history yet."],
+                ttl="3600s" # Keeps the cache alive for 1 hour
+            )
+        )
+        _user_caches[user_id] = {"name": cache.name, "expires_at": now + 3300}
+        logger.info(f"Context Cache created for {user_id}: {cache.name}")
+        return cache.name
+    except Exception as e:
+        # This will silently fail and fallback if the context is under 32,768 tokens
+        logger.debug(f"Cache creation skipped (likely <32k tokens): {e}")
+        return None
 
 # Task registry: Holds strong references so Python's Garbage Collector doesn't kill async tasks mid-execution.
 background_tasks = set()
@@ -103,7 +137,7 @@ Respond ONLY with valid JSON.
         return {"summary": "", "domains": []}
 
 async def get_response(user_id: str, content: str, new_session: bool = False) -> str:
-    profile = await asyncio.to_thread(get_profile, user_id)
+    profile = await asyncio.to_thread(get_profile, user_id) or {}
     
     # Retrieve a broader context window (30 messages) for potential history compression
     history = await asyncio.to_thread(get_messages, user_id, 30)
@@ -121,7 +155,11 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
     conv_ctx = conv_data.get("summary", "")
     active_domains = conv_data.get("domains", [])
 
-    ctx = SYSTEM_PROMPT
+    # 1. Attempt to get cache (pass older history, excluding the last 10 messages)
+    older_history = history[:-10] if len(history) > 10 else []
+    cache_name = await get_or_create_context_cache(user_id, profile, older_history)
+
+    ctx = "" if cache_name else SYSTEM_PROMPT
 
     # Time awareness
     now_dt = datetime.now()
@@ -417,14 +455,22 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         logger.error(f"User message save error for {user_id}: {e}", exc_info=True)
 
     try:
+        gen_model = "gemini-1.5-flash-002" if cache_name else "gemini-3.1-flash-lite-preview"
+        config_kwargs = {"tools": [{"google_search": {}}]}
+        if cache_name:
+            config_kwargs["cached_content"] = cache_name
+            
         response = await client.aio.models.generate_content(
-            model="gemini-3.1-flash-lite-preview",
+            model=gen_model,
             contents=ctx,
-            config=types.GenerateContentConfig(
-                tools=[{"google_search": {}}]
-            )
+            config=types.GenerateContentConfig(**config_kwargs)
         )
         text = response.text or "I'm having a hard time processing my thoughts right now. Give me a moment."
+        
+        # Remove the internal monologue (<thought>) BEFORE saving to DB to prevent memory pollution
+        text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL).strip()
+        if not text:
+            text = "..."
         
         # Extract and format Google Search sources if MYRROR used the internet
         if response.candidates and response.candidates[0].grounding_metadata:

@@ -72,30 +72,10 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
                 thresholds = [2, 5, 10] # Reassure them sooner
             
             if days_silent in thresholds:
-                await context.bot.send_chat_action(chat_id=user_id, action="typing")
-                await asyncio.sleep(random.uniform(2.5, 5.0))
-                
-                mood = data.get("current_mood_score", "unknown")
-                unresolved = data.get("unresolved_threads", [])
-                threads_ctx = f"Pending topics you guys left hanging: {unresolved}" if unresolved else ""
-                events = data.get("upcoming_events", [])
-                events_ctx = f"Upcoming/Recent events they had: {events}" if events else ""
-                language = data.get("language", "their native language")
-
-                if days_silent == thresholds[2]:
-                    prompt = f"The user {data.get('name', '')} has completely isolated themselves and ignored your check-ins for {days_silent} days. Their last mood was {mood}/10. Write a slightly more direct, 'tough love' but deeply caring message. Acknowledge that they are hiding/withdrawing, and tell them you are not going anywhere. CRITICAL: Respond entirely in {language}."
-                else:
-                    prompt = f"The user {data.get('name', '')} hasn't spoken to you in {days_silent} days. Their last mood was {mood}/10. {threads_ctx}. {events_ctx}. Write a very short, warm, pressure-free message checking in. Sound like a friend who just thought of them. If they had an upcoming event, ASK ABOUT IT specifically. If they were sad last time, be gentle. CRITICAL: Respond entirely in {language}."
-                
-                response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
-                text = response.text.strip()
-                await context.bot.send_message(chat_id=user_id, text=text)
-                
-                # CRITICAL MEMORY FIX: Save this to the chat history so MYRROR remembers reaching out
-                await asyncio.to_thread(save_message, user_id, "assistant", f"[Proactive Check-in] {text}")
-                
-                data["last_conversation"] = now.strftime("%Y-%m-%d %H:%M")
-                await asyncio.to_thread(save_profile, user_id, data)
+                # Dispatch as background task so we don't block the sequential job loop
+                task = asyncio.create_task(_process_user_checkin(context, user_id, data, days_silent, thresholds, now))
+                _bg_tasks.add(task)
+                task.add_done_callback(_bg_tasks.discard)
         except Exception as e:
             logger.error(f"Proactive job error for {user_id}: {e}")
 
