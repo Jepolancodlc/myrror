@@ -16,7 +16,7 @@ from app.db.database import get_profile, get_episodes, get_messages, get_all_peo
 from app.services.chat import get_response
 from app.services.analyzer import analyze_image, analyze_document, analyze_voice
 from app.services.extractor import generate_daily_summary, generate_weekly_summary, run_post_analysis_tasks, set_alert_callback
-from app.bot.bot_commands import (localize, get_mood_keyboard, mood_command, sos_command, export_command, help_command, profile_command, evolution_command, episodes_command, people_command, reflect_command, week_command, mood_callback, contract_command, reset_command, flashback_command, dossier_command, setcompass_command)
+from app.bot.bot_commands import (localize, get_mood_keyboard, mood_command, sos_command, export_command, help_command, profile_command, stats_command, evolution_command, episodes_command, people_command, reflect_command, week_command, mood_callback, contract_command, reset_command, flashback_command, dossier_command, setcompass_command)
 from app.bot.bot_jobs import proactive_check_job, daily_maintenance_job
 from google import genai
 from google.genai import types
@@ -427,6 +427,7 @@ async def start_telegram_bot():
     telegram_app.add_handler(CommandHandler("help", help_command))
     telegram_app.add_handler(CommandHandler("dossier", dossier_command))
     telegram_app.add_handler(CommandHandler("profile", profile_command))
+    telegram_app.add_handler(CommandHandler("stats", stats_command))
     telegram_app.add_handler(CommandHandler("evolution", evolution_command))
     telegram_app.add_handler(CommandHandler("episodes", episodes_command))
     telegram_app.add_handler(CommandHandler("people", people_command))

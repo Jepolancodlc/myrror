@@ -162,6 +162,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🧠 **Self-Discovery**\n"
         "• /profile - See what I know about your personality & goals\n"
         "• /dossier - View your secret psychological and behavioral dossier\n"
+        "• /stats - View your psychological profile as RPG character stats\n"
         "• /quiz - Take a quick psychological test to reveal your blind spots\n"
         "• /evolution - Track how you've changed over time\n"
         "• /episodes - View the significant moments of your life\n"
@@ -246,6 +247,105 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_photo(photo=buf, caption=msg_cap)
         except Exception as e:
             logger.error(f"Radar chart error: {e}")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    profile = await asyncio.to_thread(get_profile, user_id)
+    
+    if not profile:
+        msg = await localize(user_id, "I don't have enough data to generate your stats yet. Keep talking to me.", profile)
+        await update.message.reply_text(msg)
+        return
+
+    msg_status = await localize(user_id, "📊 *Scouting your attributes... compiling character sheet...*", profile)
+    status_msg = await update.message.reply_text(msg_status, parse_mode="Markdown")
+
+    prompt = f"""You are a master scout and RPG game master. Based on the following psychological profile, evaluate this user as if they were a video game character or an athlete.
+Assign them numerical scores from 1 to 100 for the following attributes based STRICTLY on their behavioral patterns, cognition, flaws, and strengths.
+
+PROFILE: {json.dumps(profile, ensure_ascii=False)}
+
+Respond ONLY with a JSON object in this exact format:
+{{
+    "core": {{"Intellect": 0, "Empathy": 0, "Resilience": 0, "Discipline": 0, "Charisma": 0, "Creativity": 0}},
+    "survival": {{"Stress Tolerance": 0, "Adaptability": 0, "Willpower": 0, "Ego Defense": 0}},
+    "class": "A two-word RPG Class (e.g. Chaotic Mage, Stoic Paladin)"
+}}"""
+
+    try:
+        from google.genai import types
+        response = await safe_generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        data = json.loads(response.text)
+        
+        def _generate_stats_graphs(stats_data):
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            import io
+            import math
+            
+            fig = plt.figure(figsize=(10, 5), facecolor='#121212')
+            
+            # --- Gráfico de Radar (Core Stats) ---
+            ax1 = fig.add_subplot(121, polar=True, facecolor='#121212')
+            core = stats_data.get("core", {})
+            labels = list(core.keys())
+            values = list(core.values())
+            
+            num_vars = len(labels)
+            angles = [n / float(num_vars) * 2 * math.pi for n in range(num_vars)]
+            values += values[:1]
+            angles += angles[:1]
+            
+            ax1.fill(angles, values, color='#00ffcc', alpha=0.3)
+            ax1.plot(angles, values, color='#00ffcc', linewidth=2)
+            ax1.set_ylim(0, 100)
+            ax1.set_xticks(angles[:-1])
+            ax1.set_xticklabels(labels, color='white', size=10)
+            ax1.set_yticklabels([])
+            ax1.spines['polar'].set_color('#333333')
+            ax1.set_title("Core Attributes", color='white', pad=20, size=14, weight='bold')
+            
+            # --- Gráfico de Barras (Survival Stats) ---
+            ax2 = fig.add_subplot(122, facecolor='#121212')
+            surv = stats_data.get("survival", {})
+            y_pos = range(len(surv))
+            bars = ax2.barh(y_pos, list(surv.values()), color='#ff007f', height=0.5)
+            
+            ax2.set_yticks(y_pos)
+            ax2.set_yticklabels(list(surv.keys()), color='white', size=11)
+            ax2.set_xlim(0, 100)
+            ax2.invert_yaxis()
+            for spine in ['top', 'right', 'bottom', 'left']: ax2.spines[spine].set_visible(False)
+            ax2.tick_params(axis='x', colors='#121212') # Ocultar números de x
+            ax2.set_title("Survival Stats", color='white', pad=20, size=14, weight='bold')
+            
+            for bar in bars:
+                ax2.text(bar.get_width() + 3, bar.get_y() + bar.get_height()/2, f'{int(bar.get_width())}', ha='left', va='center', color='white', weight='bold')
+                         
+            fig.suptitle(f"Class: {stats_data.get('class', 'Unknown')}", color='#f1c40f', size=18, weight='bold', y=1.05)
+            fig.tight_layout()
+            
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight', dpi=150)
+            buf.seek(0)
+            plt.close(fig)
+            return buf
+
+        buf = await asyncio.to_thread(_generate_stats_graphs, data)
+        caption = await localize(user_id, f"🎮 **Your Character Sheet**\nClass: {data.get('class', 'Unknown')}\n\nThese stats are dynamically generated based on your real psychological profile.", profile)
+        
+        await update.message.reply_photo(photo=buf, caption=caption, parse_mode="Markdown")
+        await status_msg.delete()
+        
+    except Exception as e:
+        logger.error(f"Stats command error: {e}")
+        msg_err = await localize(user_id, "I couldn't generate your stats right now. Try again later.", profile)
+        await status_msg.edit_text(msg_err)
 
 async def dossier_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)

@@ -147,7 +147,8 @@ def deep_merge(base: dict, updates: dict) -> dict:
         "cognitive_biases", "unspoken_fears", "unmet_needs", "shadow_traits",
         "goals", "fears", "strengths", "weaknesses", "personality_traits",
         "life_situations", "failed_advice", "detected_patterns", "contradictions",
-        "media_and_tastes", "avoidance_patterns", "state_of_mind_anomalies"
+        "media_and_tastes", "avoidance_patterns", "state_of_mind_anomalies",
+        "defense_mechanisms", "daily_routines", "core_values", "social_roles"
     }
     
     for key, value in updates.items():
@@ -180,7 +181,8 @@ def track_evolution(profile: dict, new_data: dict) -> list:
         "unmet_needs", "interaction_manual", "attachment_style", "shadow_traits",
         "clinical_profile", "unrealized_truths", "behavioral_patterns",
         "quirks_and_micro_details", "cognition_style", "psyche_and_motivations",
-        "avoidance_patterns"
+        "avoidance_patterns", "defense_mechanisms", "daily_routines", 
+        "core_values", "social_roles", "lifestyle"
     ]
     evolution = (profile.get("evolution") or [])[-49:] # Token Optimization: Cap the evolution log at the last 50 records to prevent token explosion over time
     now = datetime.now().strftime("%Y-%m-%d")
@@ -288,6 +290,9 @@ def get_profile_for_context(profile: dict, context_text: str = "", active_domain
         "preferred_tone": profile.get("preferred_tone"),
         "media_and_tastes": profile.get("media_and_tastes"),
         "avoidance_patterns": profile.get("avoidance_patterns"),
+        "defense_mechanisms": profile.get("defense_mechanisms"),
+        "daily_routines": profile.get("daily_routines"),
+        "core_values": profile.get("core_values"),
     }
 
     layer2 = {}
@@ -458,6 +463,11 @@ ANALYSIS INSTRUCTIONS (WHAT TO OBSERVE):
 
 YOUR TASK:
 Extract EVERYTHING about the USER. Update their "Profile Dossier" comprehensively:
+- Clinical & Psychometric Profile: Rigorously deduce their Big Five (OCEAN), MBTI, Enneagram, and Attachment Style. Detect any pronounced dark triad traits or neuroses.
+- Lifestyle & Routines: Deduce their daily habits, sleep schedule, physical energy, and routines based on when and how they text.
+- Defense Mechanisms: How do they protect their ego? (e.g., intellectualization, humor, projection, withdrawal).
+- Social & Relational Dynamics: Their role in groups, true vs. projected persona, and boundary setting.
+- Moral & Values: Their absolute non-negotiables, core life values, and moral alignment.
 - Personality Summary: Detailed analysis of their psyche, archetype, and underlying motivations.
 - Communication & Cognition Style: How they process information (logical, emotional, impulsive, reflective).
 - Emotional Volatility: Assess if their mood is stable, erratic, numbed, or intensely fluctuating.
@@ -467,9 +477,10 @@ Extract EVERYTHING about the USER. Update their "Profile Dossier" comprehensivel
 - State of Mind Anomalies: Detect if their writing suggests they are sleep-deprived, intoxicated, or in a manic spiral based on typos, pacing, and timestamps.
 - Evolution Log: What has changed in the user since the first interactions (handled automatically, but focus on capturing new states).
 
-Also look for: upcoming events, explicit facts, attachment_style, hidden fears,
-self-perception, skills, failed advice, personal contracts, contradictions,
-core_beliefs, cognitive_biases, unspoken_fears, unmet_needs, shadow_traits, and unrealized_truths.
+Also look for: defense_mechanisms, daily_routines, core_values, social_roles, upcoming_events, 
+explicit facts, attachment_style, hidden fears, self-perception, skills, failed advice, 
+personal contracts, contradictions, core_beliefs, cognitive_biases, unspoken_fears, unmet_needs, 
+shadow_traits, and unrealized_truths.
 
 RULES:
 - Extract ONLY about the USER.

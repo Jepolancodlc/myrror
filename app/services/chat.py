@@ -382,6 +382,21 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         if unrealized:
             ctx += f"\n\nUNREALIZED TRUTHS (Objective facts they haven't noticed about themselves): {unrealized}"
             
+        defenses = profile.get("defense_mechanisms")
+        if defenses:
+            ctx += f"\n\nTHEIR DEFENSE MECHANISMS (How they protect their ego): {defenses}"
+            ctx += "\nWhen challenged, expect them to use these specific defenses. Bypass them intelligently instead of arguing head-on."
+            
+        routines = profile.get("daily_routines")
+        if routines:
+            ctx += f"\n\nTHEIR LIFESTYLE & ROUTINES: {routines}"
+            ctx += "\nUse this context to ground your advice in their actual day-to-day reality."
+            
+        values = profile.get("core_values")
+        if values:
+            ctx += f"\n\nTHEIR CORE VALUES: {values}"
+            ctx += "\nIf they are acting out of alignment with these values, hold up the mirror and point it out."
+
         evolution_log = profile.get("evolution", [])
         if evolution_log:
             ctx += "\n\nRECENT PSYCHOLOGICAL EVOLUTION (How they are changing):"
