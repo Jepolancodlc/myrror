@@ -22,6 +22,8 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379"
 redis_client = redis.from_url(REDIS_URL)
 
+THOUGHT_PATTERN = re.compile(r'<thought>.*?</thought>', flags=re.DOTALL)
+
 # --- API RESILIENCE SHIELD ---
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
 async def safe_generate_content(*args, **kwargs):
@@ -468,10 +470,19 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
             contents=ctx,
             config=types.GenerateContentConfig(**config_kwargs)
         )
-        text = response.text or "I'm having a hard time processing my thoughts right now. Give me a moment."
         
+        try:
+            text = response.text
+        except ValueError as e:
+            logger.warning(f"El Filtro de Seguridad de Gemini bloqueó la respuesta: {e}")
+            text = None
+            
+        if not text:
+            logger.warning("Respuesta vacía de Gemini. Revisa los logs para errores de API.")
+            text = "I'm having a hard time processing my thoughts right now. Give me a moment."
+
         # Remove the internal monologue (<thought>) BEFORE saving to DB to prevent memory pollution
-        text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL).strip()
+        text = THOUGHT_PATTERN.sub('', text).strip()
         if not text:
             text = "..."
         

@@ -11,8 +11,9 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from app.db.database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile, get_user_lock, delete_all_user_data
-from app.services.extractor import track_evolution, generate_weekly_summary
+from app.services.extractor import track_evolution, generate_weekly_summary, parse_json_response, SAFETY_SETTINGS
 from google import genai
+from google.genai import types
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,11 @@ CRITICAL: Maintain the exact same formatting, Markdown, and emojis. Do NOT add a
 TEXT TO TRANSLATE:
 {text}"""
     try:
-        response = await safe_generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
+        response = await safe_generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=prompt,
+            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
+        )
         translated = response.text.strip()
         await redis_client.set(redis_key, translated, ex=86400 * 30) # Retener por 30 días
         return translated
@@ -97,6 +102,9 @@ async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # FIX: Ensure dates and scores align perfectly by filtering together
         valid_moods = [e for e in mood_data[-14:] if str(e.get("to", "")).replace(',', '.').replace('.', '', 1).isdigit()]
+        if not valid_moods:
+            raise ValueError("No valid numeric mood data points to graph.")
+            
         dates = [e["date"][5:] for e in valid_moods]
         scores = [float(str(e["to"]).replace(',', '.')) for e in valid_moods]
 
@@ -202,21 +210,27 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await localize(user_id, "\n".join(lines), profile)
     await update.message.reply_text(msg)
     
-    big_five = profile.get("clinical_profile", {}).get("big_five")
-    if isinstance(big_five, dict) and len(big_five) >= 5:
+    clinical = profile.get("clinical_profile")
+    if isinstance(clinical, dict) and isinstance(clinical.get("big_five"), dict) and len(clinical.get("big_five")) >= 5:
+        big_five = clinical.get("big_five")
         def _generate_radar_chart(bf):
             import matplotlib
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
             import io
+            import math
             
+            def safe_float(val, default=5.0):
+                try: return float(val)
+                except: return default
+
             labels = ['Openness', 'Conscientiousness', 'Extraversion', 'Agreeableness', 'Neuroticism']
             values = [
-                float(bf.get("O", 5)),
-                float(bf.get("C", 5)),
-                float(bf.get("E", 5)),
-                float(bf.get("A", 5)),
-                float(bf.get("N", 5))
+                safe_float(bf.get("O", 5)),
+                safe_float(bf.get("C", 5)),
+                safe_float(bf.get("E", 5)),
+                safe_float(bf.get("A", 5)),
+                safe_float(bf.get("N", 5))
             ]
             
             num_vars = len(labels)
@@ -273,13 +287,14 @@ Respond ONLY with a JSON object in this exact format:
 }}"""
 
     try:
-        from google.genai import types
         response = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
+            config=types.GenerateContentConfig(response_mime_type="application/json", safety_settings=SAFETY_SETTINGS)
         )
-        data = json.loads(response.text)
+        data = parse_json_response(response.text)
+        if not data or not isinstance(data, dict):
+            raise ValueError("Formato de estadísticas inválido generado por la IA.")
         
         def _generate_stats_graphs(stats_data):
             import matplotlib
@@ -293,10 +308,14 @@ Respond ONLY with a JSON object in this exact format:
             # --- Gráfico de Radar (Core Stats) ---
             ax1 = fig.add_subplot(121, polar=True, facecolor='#121212')
             core = stats_data.get("core", {})
+            if not core or not isinstance(core, dict):
+                core = {"Intellect": 50, "Empathy": 50, "Resilience": 50, "Discipline": 50, "Charisma": 50}
+                
             labels = list(core.keys())
             values = list(core.values())
             
             num_vars = len(labels)
+            if num_vars == 0: num_vars = 1
             angles = [n / float(num_vars) * 2 * math.pi for n in range(num_vars)]
             values += values[:1]
             angles += angles[:1]
@@ -517,7 +536,11 @@ INSTRUCTIONS:
 6. CRITICAL: Respond entirely in {language}. Format beautifully with markdown.
 """
     try:
-        response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
+        response = await client.aio.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=prompt,
+            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
+        )
         try:
             await status_msg.edit_text(response.text, parse_mode="Markdown")
         except Exception:
@@ -551,7 +574,7 @@ async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(query.from_user.id)
     mood_val = query.data.split("_")[1]
     async with get_user_lock(user_id):
-        profile = await asyncio.to_thread(get_profile, user_id)
+        profile = await asyncio.to_thread(get_profile, user_id) or {}
         new_data = {"current_mood_score": int(mood_val)}
         evolution = track_evolution(profile, new_data)
         profile["current_mood_score"] = int(mood_val)
@@ -560,7 +583,11 @@ async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(save_profile, user_id, profile)
     val = int(mood_val)
     category = "low" if val <= 4 else ("mid" if val <= 7 else "high")
-    response_texts = {"low": "You clicked low... I'm sorry things are heavy right now. I'm here if you want to vent.", "mid": "Right down the middle. Surviving the day. Anything specific on your mind?", "high": "Glad to see you're doing well! Tell me what's making it a good day."}
+    response_texts = {
+        "low": "You clicked low... I'm sorry things are heavy right now. I'm here if you want to vent.",
+        "mid": "Right down the middle. Surviving the day. Anything specific on your mind?",
+        "high": "Glad to see you're doing well! Tell me what's making it a good day."
+    }
     msg = await localize(user_id, f"Mood recorded: {mood_val}/10.\n\n{response_texts[category]}", profile)
     await query.edit_message_text(text=msg)
 
@@ -605,7 +632,11 @@ async def flashback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt += "\n\nCRITICAL: Respond entirely in the user's primary language."
     await update.message.chat.send_action("typing")
     try:
-        response = await client.aio.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
+        response = await client.aio.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=prompt,
+            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
+        )
         await update.message.reply_text(response.text.strip())
     except Exception as e:
         logger.error(f"Flashback error: {e}")

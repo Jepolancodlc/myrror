@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from app.db.database import get_profile, get_episodes, get_messages, get_all_people, supabase, save_profile, delete_user_messages
 from app.services.chat import get_response
 from app.services.analyzer import analyze_image, analyze_document, analyze_voice
-from app.services.extractor import generate_daily_summary, generate_weekly_summary, run_post_analysis_tasks, set_alert_callback
+from app.services.extractor import generate_daily_summary, generate_weekly_summary, run_post_analysis_tasks, set_alert_callback, SAFETY_SETTINGS
 from app.bot.bot_commands import (localize, get_mood_keyboard, mood_command, sos_command, export_command, help_command, profile_command, stats_command, evolution_command, episodes_command, people_command, reflect_command, week_command, mood_callback, contract_command, reset_command, flashback_command, dossier_command, setcompass_command)
 from app.bot.bot_jobs import proactive_check_job, daily_maintenance_job
 from google import genai
@@ -32,6 +32,9 @@ REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379"
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 redis_client = redis.from_url(REDIS_URL)
 telegram_app = None
+
+THOUGHT_PATTERN = re.compile(r'<thought>.*?</thought>', flags=re.DOTALL)
+OPTIONS_PATTERN = re.compile(r'\[OPTIONS:(.*?)\]')
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
 async def safe_generate_content(*args, **kwargs):
@@ -99,10 +102,19 @@ User Profile: {json.dumps(profile)}"""
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=QuizSchema
+                response_schema=QuizSchema,
+                safety_settings=SAFETY_SETTINGS
             )
         )
-        data = json.loads(response.text)
+        
+        try:
+            raw_text = response.text
+        except ValueError:
+            raw_text = ""
+            
+        # Filtrar <thought> de Gemini para evitar el JSONDecodeError
+        raw_text = THOUGHT_PATTERN.sub('', raw_text).strip()
+        data = json.loads(raw_text)
         
         keyboard = []
         for i, opt in enumerate(data["options"]):
@@ -287,7 +299,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
             markup = get_mood_keyboard()
             
         # Intercepción de opciones dinámicas (Botones interactivos del LLM)
-        options_match = re.search(r'\[OPTIONS:(.*?)\]', text)
+        options_match = OPTIONS_PATTERN.search(text)
         if options_match:
             options_str = options_match.group(1)
             text = text.replace(options_match.group(0), "").strip()

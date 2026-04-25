@@ -5,7 +5,9 @@ import random
 import os
 from datetime import datetime, timedelta
 from google import genai
+from google.genai import types
 from app.db.database import get_null_episodes, update_episode_embedding, supabase, save_message, get_user_lock, get_profile, save_profile
+from app.services.extractor import SAFETY_SETTINGS
 from telegram.ext import ContextTypes
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -43,8 +45,21 @@ async def _process_user_checkin(context, user_id, data, days_silent, thresholds,
         else:
             prompt = f"The user {data.get('name', '')} hasn't spoken to you in {days_silent} days. Their last mood was {mood}/10. {threads_ctx}. {events_ctx}. Write a very short, warm, pressure-free message checking in. Sound like a friend who just thought of them. If they had an upcoming event, ASK ABOUT IT specifically. If they were sad last time, be gentle. CRITICAL: Respond entirely in {language}."
         
-        response = await safe_generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt)
-        text = response.text.strip()
+        response = await safe_generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=prompt,
+            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
+        )
+        
+        try:
+            text = response.text.strip()
+        except ValueError as e:
+            logger.warning(f"Proactive check-in blocked by safety filters for {user_id}: {e}")
+            return
+            
+        if not text:
+            return
+            
         await context.bot.send_message(chat_id=user_id, text=text)
         
         # CRITICAL MEMORY FIX: Save this to the chat history so MYRROR remembers reaching out
@@ -68,6 +83,7 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
             lambda: supabase.table("profiles")
             .select("user_id, data")
             .lte("data->>last_conversation", cutoff_date)
+            .limit(100)
             .execute()
         )
         profiles = response.data or []
@@ -108,7 +124,11 @@ async def daily_maintenance_job(context: ContextTypes.DEFAULT_TYPE):
     # Query delegada a Supabase: Extraer IDs únicos que realmente necesitan reparación
     try:
         response = await asyncio.to_thread(
-            lambda: supabase.table("episodes").select("user_id").is_("embedding", "null").execute()
+            lambda: supabase.table("episodes")
+            .select("user_id")
+            .is_("embedding", "null")
+            .limit(500)
+            .execute()
         )
         if not response.data: 
             return

@@ -21,6 +21,17 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 alert_callback = None
 
+# Expresiones regulares pre-compiladas para optimizar el rendimiento y reducir el uso de CPU
+THOUGHT_PATTERN = re.compile(r'<thought>.*?</thought>', flags=re.DOTALL)
+MARKDOWN_JSON_PATTERN = re.compile(r'```(?:json)?\s*([\s\S]*?)\s*```', re.IGNORECASE)
+
+SAFETY_SETTINGS = [
+    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE)
+]
+
 def set_alert_callback(cb):
     global alert_callback
     alert_callback = cb
@@ -94,10 +105,12 @@ Format cleanly. Respond in {language}.
     try:
         response = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
-            contents=prompt
+            contents=prompt,
+            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
         if alert_callback and response.text:
             text = response.text.strip()
+            text = THOUGHT_PATTERN.sub('', text).strip()
             await alert_callback(user_id, text)
             # Save this epiphany as a message so it's in the history and MYRROR remembers sending it
             await asyncio.to_thread(save_message, user_id, "assistant", f"[Proactive Epiphany] {text}")
@@ -118,8 +131,10 @@ def parse_json_response(text: str):
     Sanitizes markdown blocks (e.g., ```json) in Gemini responses and safely parses them into a dict.
     """
     try:
+        # Prevenir que tags de pensamiento arruinen el regex o el JSON
+        text = THOUGHT_PATTERN.sub('', text).strip()
         # Regex to robustly capture anything between markdown backticks
-        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text, re.IGNORECASE)
+        match = MARKDOWN_JSON_PATTERN.search(text)
         if match:
             clean = match.group(1).strip()
         else:
@@ -208,7 +223,7 @@ def track_evolution(profile: dict, new_data: dict) -> list:
                 changed = True
                 change_note = f"Added: {added}" if added else ""
                 if removed:
-                        change_note += f" | Removed: {removed}" if change_note else f"Removed: {removed}"
+                    change_note += f" | Removed: {removed}" if change_note else f"Removed: {removed}"
             elif isinstance(old_value, dict) and isinstance(new_value, dict):
                 dict_changes = []
                 all_keys = set(old_value.keys()).union(new_value.keys())
@@ -391,7 +406,8 @@ CRITICAL RULES:
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=list[PersonSchema]
+                response_schema=list[PersonSchema],
+                safety_settings=SAFETY_SETTINGS
             )
         )
         people = parse_json_response(result.text)
@@ -498,7 +514,8 @@ RULES:
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=ProfileSchema
+                response_schema=ProfileSchema,
+                safety_settings=SAFETY_SETTINGS
             )
         )
         new_data = parse_json_response(result.text)
@@ -581,7 +598,8 @@ CRITICAL RULES for Extraction:
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=list[EpisodeSchema]
+                response_schema=list[EpisodeSchema],
+                safety_settings=SAFETY_SETTINGS
             )
         )
         episodes = parse_json_response(result.text)
@@ -662,9 +680,11 @@ INSTRUCTIONS:
     try:
         result = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
-            contents=prompt
+            contents=prompt,
+            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
         summary = result.text.strip()
+        summary = THOUGHT_PATTERN.sub('', summary).strip()
         if not summary:
             return ""
         
@@ -718,9 +738,11 @@ Include a brief self-critique: What approach worked or failed for MYRROR today b
     try:
         result = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
-            contents=prompt
+            contents=prompt,
+            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
         summary = result.text.strip()
+        summary = THOUGHT_PATTERN.sub('', summary).strip()
         
         embedding = None
         try:
@@ -795,9 +817,11 @@ async def compress_history(user_id: str, messages: list, profile: dict) -> str:
     try:
         result = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
-            contents=prompt
+            contents=prompt,
+            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
         summary = result.text.strip()
+        summary = THOUGHT_PATTERN.sub('', summary).strip()
         
         async def save_cache():
             async with get_user_lock(user_id):

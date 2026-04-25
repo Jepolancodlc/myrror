@@ -6,15 +6,18 @@ import asyncio
 from datetime import datetime
 import re
 from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 from app.core.prompt import SYSTEM_PROMPT
 from app.db.database import get_profile, save_message, get_messages
-from app.services.extractor import get_profile_for_context, get_rag_memories_text
+from app.services.extractor import get_profile_for_context, get_rag_memories_text, SAFETY_SETTINGS
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+THOUGHT_PATTERN = re.compile(r'<thought>.*?</thought>', flags=re.DOTALL)
 
 async def analyze_image(user_id: str, file_bytes: bytearray, caption: str) -> str:
     profile = await asyncio.to_thread(get_profile, user_id) or {}
@@ -62,11 +65,20 @@ async def analyze_image(user_id: str, file_bytes: bytearray, caption: str) -> st
                         {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
                     ]
                 }
-            ]
+            ],
+            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
-        text = response.text
         
-        text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL).strip()
+        try:
+            text = response.text
+        except ValueError as e:
+            logger.warning(f"Image analysis blocked by Gemini: {e}")
+            text = None
+            
+        if not text:
+            text = "I couldn't analyze the image clearly. Let's talk about something else."
+            
+        text = THOUGHT_PATTERN.sub('', text).strip()
         if not text: text = "..."
         
         await asyncio.to_thread(save_message, user_id, "user", f"[Image] {caption}")
@@ -128,7 +140,8 @@ INSTRUCTIONS:
 """
             response = await client.aio.models.generate_content(
                 model="gemini-3.1-flash-lite-preview",
-                contents=analysis_prompt
+                contents=analysis_prompt,
+                config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
             )
 
         elif mime == "application/pdf" or mime.startswith("image/"):
@@ -153,14 +166,23 @@ INSTRUCTIONS:
                             {"inline_data": {"mime_type": mime, "data": file_base64}}
                         ]
                     }
-                ]
+            ],
+            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
             )
         else:
             return None
 
-        text = response.text
         
-        text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL).strip()
+        try:
+            text = response.text
+        except ValueError as e:
+            logger.warning(f"Document analysis blocked by Gemini: {e}")
+            text = None
+            
+        if not text:
+            text = "I couldn't read the document properly. Some content might have been blocked."
+            
+        text = THOUGHT_PATTERN.sub('', text).strip()
         if not text: text = "..."
         
         await asyncio.to_thread(save_message, user_id, "user", f"[File: {filename}] {caption}")
@@ -189,9 +211,15 @@ async def analyze_voice(user_id: str, file_bytes: bytearray, mime: str) -> str:
                         {"inline_data": {"mime_type": mime, "data": audio_base64}}
                     ]
                 }
-            ]
+            ],
+            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
-        return response.text.strip()
+        
+        try:
+            return response.text.strip()
+        except ValueError as e:
+            logger.warning(f"Voice analysis blocked by Gemini: {e}")
+            return "[Voice Analysis: Unable to process]\n\n(I couldn't transcribe this audio.)"
     except Exception as e:
         logger.error(f"Voice analysis error for {user_id}: {e}", exc_info=True)
         raise
