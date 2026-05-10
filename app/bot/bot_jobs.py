@@ -52,12 +52,15 @@ async def _process_user_checkin(context, user_id, data, days_silent, thresholds,
         if days_silent == thresholds[2]:
             prompt = f"The user {data.get('name', '')} has completely isolated themselves and ignored your check-ins for {days_silent} days. Their last mood was {mood}/10. Write a slightly more direct, 'tough love' but deeply caring message. Acknowledge that they are hiding/withdrawing, and tell them you are not going anywhere. CRITICAL: Respond entirely in {language}."
         else:
-            prompt = f"The user {data.get('name', '')} hasn't spoken to you in {days_silent} days. Their last mood was {mood}/10. {threads_ctx}. {events_ctx}. Write a very short, warm, pressure-free message checking in. Sound like a friend who just thought of them. If they had an upcoming event, ASK ABOUT IT specifically. If they were sad last time, be gentle. CRITICAL: Respond entirely in {language}."
+            prompt = f"The user {data.get('name', '')} hasn't spoken to you in {days_silent} days. Their last mood was {mood}/10. {threads_ctx}. {events_ctx}. Write a very short, warm, pressure-free message checking in. Sound like a friend who just thought of them. If they had an upcoming event, ASK ABOUT IT specifically (use Google Search to research the event if you need context). If they were sad last time, be gentle. CRITICAL: Respond entirely in {language}."
         
         response = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
-            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
+            config=types.GenerateContentConfig(
+                safety_settings=SAFETY_SETTINGS,
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
         )
         
         try:

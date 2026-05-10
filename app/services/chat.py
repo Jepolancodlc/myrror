@@ -25,7 +25,7 @@ redis_client = redis.from_url(REDIS_URL)
 THOUGHT_PATTERN = re.compile(r'<thought>.*?</thought>', flags=re.DOTALL)
 
 # --- API RESILIENCE SHIELD ---
-@retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=3, max=30), reraise=True)
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
 async def safe_generate_content(*args, **kwargs):
     """Auto-retry for Gemini API if Google returns 429 (Rate Limit) or network timeouts."""
     return await client.aio.models.generate_content(*args, **kwargs)
@@ -123,17 +123,29 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
     )
     profile = profile_res or {}
 
-    recent_history = history[-10:] if history else []
-    compressed_context = await compress_history(user_id, history, profile)
+    recent_history = history[-20:] if history else []
 
-    # --- SEMANTIC ROUTING (DYNAMIC DOMAINS) ---
-    conv_data = {"summary": "", "domains": [], "is_crisis": False}
-    is_substantial = len(content.split()) >= 4 or len(content) > 20
-    if recent_history and len(recent_history) >= 1 and (is_substantial or new_session):
-        try:
-            conv_data = await analyze_conversation_context(content, recent_history)
-        except Exception as e:
-            logger.error(f"Conversation context error: {e}")
+    # --- PARALLEL RAG & ROUTING (Halves API wait time) ---
+    async def fetch_routing():
+        is_substantial = len(content.split()) >= 4 or len(content) > 20
+        if recent_history and (is_substantial or new_session):
+            try:
+                return await analyze_conversation_context(content, recent_history[-5:])
+            except Exception as e:
+                logger.error(f"Conversation context error: {e}")
+        return {"summary": "", "domains": [], "is_crisis": False}
+
+    async def fetch_rag():
+        has_substance = len(content.split()) >= 6 or len(content) > 30
+        if has_substance:
+            try:
+                embed_text = content[:1000]
+                return await get_rag_memories_text(user_id, embed_text)
+            except Exception as e:
+                logger.error(f"RAG search error: {e}", exc_info=True)
+        return ""
+
+    conv_data, eps_text = await asyncio.gather(fetch_routing(), fetch_rag())
 
     conv_ctx = conv_data.get("summary", "")
     active_domains = conv_data.get("domains", [])
@@ -149,11 +161,7 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
     if not in_crisis and any(kw in content.lower() for kw in fallback_keywords):
         in_crisis = True
 
-    # 1. Attempt to get cache (pass older history, excluding the last 10 messages)
-    older_history = history[:-10] if len(history) > 10 else []
-    cache_name = await get_or_create_context_cache(user_id, profile, older_history)
-
-    ctx = "" if cache_name else SYSTEM_PROMPT
+    ctx = SYSTEM_PROMPT
 
     # Time awareness
     now_dt = datetime.now()
@@ -271,7 +279,18 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         if language:
             ctx += f"\n\nCRITICAL LANGUAGE INSTRUCTION: You MUST respond entirely in {language}."
             
-        ctx += f"\n\nWHAT YOU KNOW ABOUT THIS USER (USE THIS INVISIBLY, DO NOT RECITE IT):\n{get_profile_for_context(profile, active_domains=active_domains)}"
+        # TOKEN OPTIMIZATION: Filter out profile keys that are explicitly injected via instructions below
+        # to prevent Gemini from reading massive duplicated JSON blocks (~40% token reduction per message).
+        keys_to_exclude = {
+            "communication_style", "humor_style", "preferred_tone", "cognition_style",
+            "job", "skills", "cultural_background", "media_and_tastes", "life_compass",
+            "interaction_manual", "attachment_style", "shadow_traits", "core_beliefs",
+            "unspoken_fears", "unmet_needs", "cognitive_biases", "personal_contracts",
+            "contradictions", "avoidance_patterns", "clinical_profile", "unrealized_truths",
+            "defense_mechanisms", "daily_routines", "core_values"
+        }
+        slim_profile = {k: v for k, v in profile.items() if k not in keys_to_exclude}
+        ctx += f"\n\nWHAT YOU KNOW ABOUT THIS USER (USE THIS INVISIBLY, DO NOT RECITE IT):\n{get_profile_for_context(slim_profile, active_domains=active_domains)}"
 
         comm_style = profile.get("communication_style")
         humor = profile.get("humor_style")
@@ -393,20 +412,8 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
     # Semantic RAG Memory Engine
     memory_block = []
     
-    # Semantic RAG Trigger: Only run costly vector searches if the message has real substance
-    # or if the Semantic Router flagged active psychological domains.
-    has_substance = len(content.split()) >= 8 or len(content) > 40
-    if has_substance or active_domains:
-        try:
-            # HYPER-PRECISE RAG: Combine the high-level conversation summary with the raw message
-            embed_text = f"Context: {conv_ctx}\nMessage: {content}"
-            # Limit token cost by truncating unnecessary length before embedding
-            embed_text = embed_text if len(embed_text) <= 2000 else embed_text[:2000]
-            eps_text = await get_rag_memories_text(user_id, embed_text)
-            if eps_text:
-                memory_block.append(f"RELEVANT PAST MEMORIES (Triggered by the user's message):\n{eps_text}\nSTEALTH MEMORY: Use these invisibly. Sound like a human who just remembered something naturally. Draw advice from their OWN past track record.")
-        except Exception as e:
-            logger.error(f"RAG search error for {user_id}: {e}", exc_info=True)
+    if eps_text:
+        memory_block.append(f"RELEVANT PAST MEMORIES (Triggered by the user's message):\n{eps_text}\nSTEALTH MEMORY: Use these invisibly. Sound like a human who just remembered something naturally. Draw advice from their OWN past track record.")
 
     people = await asyncio.to_thread(get_all_people, user_id)
     if people:
@@ -418,17 +425,23 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
                 relevant_people.append(p)
                 
         if relevant_people:
-            people_summary = "\n".join([f"- {p['name']} ({p.get('relationship', 'unknown')}): {p.get('notes', {}).get('description', '')}" for p in relevant_people])
+            # Truncate descriptions to save tokens
+            people_summary = "\n".join([f"- {p['name']} ({p.get('relationship', 'unknown')}): {str(p.get('notes', {}).get('description', ''))[:150]}" for p in relevant_people])
             memory_block.append(f"RELEVANT PEOPLE IN THEIR LIFE:\n{people_summary}")
 
     # --- 5. HISTORY ---
     history_block = []
-    if compressed_context:
-        history_block.append(f"COMPRESSED OLDER CONTEXT:\n{compressed_context}")
     if conv_ctx:
         history_block.append(f"CONVERSATIONAL CONTEXT: {conv_ctx}")
     if recent_history:
-        recent_str = "\n".join([f"{'User' if msg['role'] == 'user' else 'MYRROR'}: {msg['content'][:2500]}" for msg in recent_history])
+        recent_formatted = []
+        for i, msg in enumerate(recent_history):
+            role = 'User' if msg['role'] == 'user' else 'MYRROR'
+            # TOKEN OPTIMIZATION: Heavy truncation for older context, full text for the last 3 turns
+            limit = 2500 if i >= len(recent_history) - 3 else 300
+            safe_content = msg['content'] if len(msg['content']) <= limit else msg['content'][:limit] + "... [trunc]"
+            recent_formatted.append(f"{role}: {safe_content}")
+        recent_str = "\n".join(recent_formatted)
         history_block.append(f"RECENT HISTORY:\n{recent_str}")
 
     # --- ASSEMBLE THE GOD PROMPT ---
@@ -445,16 +458,13 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         logger.error(f"User message save error for {user_id}: {e}", exc_info=True)
 
     try:
-        gen_model = "gemini-1.5-flash-002" if cache_name else "gemini-3.1-flash-lite-preview"
         config_kwargs = {
             "tools": [types.Tool(google_search=types.GoogleSearch())],
             "safety_settings": SAFETY_SETTINGS
         }
-        if cache_name:
-            config_kwargs["cached_content"] = cache_name
             
         response = await safe_generate_content(
-            model=gen_model,
+            model="gemini-3.1-flash-lite-preview",
             contents=ctx,
             config=types.GenerateContentConfig(**config_kwargs)
         )

@@ -134,7 +134,10 @@ Format cleanly. Respond in {language}.
         response = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
-            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
+            config=types.GenerateContentConfig(
+                safety_settings=SAFETY_SETTINGS,
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
         )
         
         try:
@@ -709,7 +712,10 @@ INSTRUCTIONS:
         result = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
-            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
+            config=types.GenerateContentConfig(
+                safety_settings=SAFETY_SETTINGS,
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
         )
         
         try:
@@ -768,7 +774,10 @@ Include a brief self-critique: What approach worked or failed for MYRROR today b
         result = await safe_generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=prompt,
-            config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
+            config=types.GenerateContentConfig(
+                safety_settings=SAFETY_SETTINGS,
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
         )
         
         try:
@@ -930,7 +939,8 @@ Return a JSON object containing 'profile_updates', 'episodes', and 'people'.
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=UnifiedExtractionSchema,
-                safety_settings=SAFETY_SETTINGS
+                safety_settings=SAFETY_SETTINGS,
+                tools=[types.Tool(google_search=types.GoogleSearch())]
             )
         )
         
