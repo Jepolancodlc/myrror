@@ -10,7 +10,6 @@ from google import genai
 from google.genai import types
 from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
 from app.db.database import get_profile, save_profile, save_episode, save_person, get_all_people, save_message, get_episodes, get_user_lock, get_messages, search_similar_episodes
 from app.models.schemas import PersonSchema, ProfileSchema, EpisodeSchema, UnifiedExtractionSchema
 from datetime import datetime
@@ -20,8 +19,15 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Load local embedding model (runs on CPU/RAM, zero API cost)
-sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+try:
+    from sentence_transformers import SentenceTransformer
+    # Load local embedding model (runs on CPU/RAM, zero API cost)
+    sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+    USE_LOCAL_EMBEDDINGS = True
+except (ImportError, Exception) as e:
+    logger.warning(f"Local embeddings unavailable ({e}). Falling back to Gemini.")
+    sentence_model = None
+    USE_LOCAL_EMBEDDINGS = False
 
 alert_callback = None
 
@@ -47,6 +53,24 @@ _bg_tasks = set()
 async def safe_generate_content(*args, **kwargs):
     """Previene que los resúmenes y extracción de memoria mueran si la API parpadea."""
     return await client.aio.models.generate_content(*args, **kwargs)
+
+@retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=3, max=30), reraise=True)
+async def safe_embed_content(*args, **kwargs):
+    """Protege la generación de embeddings en caso de usar la API de respaldo."""
+    return await client.aio.models.embed_content(*args, **kwargs)
+
+async def generate_embedding(text: str) -> list:
+    """Generates an embedding vector, using local model if available, else Gemini API with 384 dimensions."""
+    if USE_LOCAL_EMBEDDINGS and sentence_model:
+        return await asyncio.to_thread(lambda: sentence_model.encode(text).tolist())
+    else:
+        # Fallback to Gemini with 384 dimensions to match the DB seamlessly
+        emb_res = await safe_embed_content(
+            model="text-embedding-004",
+            contents=text,
+            config=types.EmbedContentConfig(output_dimensionality=384)
+        )
+        return emb_res.embeddings[0].values if emb_res.embeddings else []
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # EPIPHANY ENGINE (AUTONOMOUS INSIGHTS)
@@ -112,8 +136,14 @@ Format cleanly. Respond in {language}.
             contents=prompt,
             config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
-        if alert_callback and response.text:
+        
+        try:
             text = response.text.strip()
+        except ValueError:
+            logger.warning("Epiphany generation blocked by safety filters.")
+            return
+            
+        if alert_callback and text:
             text = THOUGHT_PATTERN.sub('', text).strip()
             await alert_callback(user_id, text)
             # Save this epiphany as a message so it's in the history and MYRROR remembers sending it
@@ -613,8 +643,7 @@ CRITICAL RULES for Extraction:
             if episode.get("event"):
                 embedding = None
                 try:
-                        # Generate embedding locally without blocking the async loop
-                        embedding = await asyncio.to_thread(lambda text=episode["event"]: sentence_model.encode(text).tolist())
+                        embedding = await generate_embedding(episode["event"])
                 except Exception as e:
                     logger.error(f"Embedding error: {e}")
 
@@ -682,14 +711,20 @@ INSTRUCTIONS:
             contents=prompt,
             config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
-        summary = result.text.strip()
+        
+        try:
+            summary = result.text.strip()
+        except ValueError:
+            logger.warning("Weekly summary blocked by safety filters.")
+            return ""
+            
         summary = THOUGHT_PATTERN.sub('', summary).strip()
         if not summary:
             return ""
         
         embedding = None
         try:
-            embedding = await asyncio.to_thread(lambda text=f"Weekly summary: {summary[:1000]}": sentence_model.encode(text).tolist())
+            embedding = await generate_embedding(f"Weekly summary: {summary[:1000]}")
         except Exception as e:
             logger.error(f"Weekly summary embedding error: {e}")
 
@@ -735,12 +770,18 @@ Include a brief self-critique: What approach worked or failed for MYRROR today b
             contents=prompt,
             config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
-        summary = result.text.strip()
+        
+        try:
+            summary = result.text.strip()
+        except ValueError:
+            logger.warning("Daily summary blocked by safety filters.")
+            return
+            
         summary = THOUGHT_PATTERN.sub('', summary).strip()
         
         embedding = None
         try:
-            embedding = await asyncio.to_thread(lambda text=f"Daily summary: {summary[:200]}": sentence_model.encode(text).tolist())
+            embedding = await generate_embedding(f"Daily summary: {summary[:200]}")
         except Exception as e:
             logger.error(f"Daily summary embedding error: {e}")
             
@@ -809,7 +850,13 @@ async def compress_history(user_id: str, messages: list, profile: dict) -> str:
             contents=prompt,
             config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
-        summary = result.text.strip()
+        
+        try:
+            summary = result.text.strip()
+        except ValueError:
+            logger.warning("History compression blocked by safety filters.")
+            return cache.get("summary", "")
+            
         summary = THOUGHT_PATTERN.sub('', summary).strip()
         
         async def save_cache():
@@ -932,7 +979,7 @@ Return a JSON object containing 'profile_updates', 'episodes', and 'people'.
                 if episode.get("event"):
                     embedding = None
                     try:
-                        embedding = await asyncio.to_thread(lambda text=episode["event"]: sentence_model.encode(text).tolist())
+                        embedding = await generate_embedding(episode["event"])
                     except Exception as e:
                         logger.error(f"Embedding error: {e}")
 
@@ -983,8 +1030,9 @@ async def get_rag_memories_text(user_id: str, query_text: str) -> str:
     if not query_text or (len(query_text.split()) <= 3 and len(query_text) <= 15):
         return ""
     try:
-        embedding = await asyncio.to_thread(lambda text=query_text[:8000]: sentence_model.encode(text).tolist())
-        
+        embedding = await generate_embedding(query_text[:8000])
+        if not embedding:
+            return ""
         relevant_episodes = await asyncio.to_thread(search_similar_episodes, user_id, embedding, limit=3)
         if not relevant_episodes:
             return ""

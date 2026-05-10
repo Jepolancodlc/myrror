@@ -37,9 +37,13 @@ async def get_or_create_context_cache(user_id: str, profile: dict, full_history:
     Creates a Gemini Context Cache for the static parts of the God Prompt.
     Requires >= 32,768 tokens and a compatible model (e.g., gemini-1.5-flash-002).
     """
-    cached_name = await redis_client.get(f"gemini_cache:{user_id}")
-    if cached_name:
-        return cached_name.decode('utf-8')
+    try:
+        cached_name = await redis_client.get(f"gemini_cache:{user_id}")
+        if cached_name:
+            return cached_name.decode('utf-8')
+    except Exception as e:
+        logger.warning(f"Redis get error (Context Cache): {e}")
+        cached_name = None
 
     static_instruction = f"{SYSTEM_PROMPT}\n\nCOMPLETE USER PROFILE:\n{json.dumps(profile, ensure_ascii=False)}"
     history_text = "\n".join([f"{'User' if m['role'] == 'user' else 'MYRROR'}: {m['content']}" for m in full_history])
@@ -54,7 +58,10 @@ async def get_or_create_context_cache(user_id: str, profile: dict, full_history:
             )
         )
         # Save in Redis with an expiration slightly shorter than Gemini's TTL (3300s = 55m)
-        await redis_client.set(f"gemini_cache:{user_id}", cache.name, ex=3300)
+        try:
+            await redis_client.set(f"gemini_cache:{user_id}", cache.name, ex=3300)
+        except Exception as e:
+            logger.warning(f"Redis set error (Context Cache): {e}")
         logger.info(f"Context Cache created for {user_id}: {cache.name}")
         return cache.name
     except Exception as e:

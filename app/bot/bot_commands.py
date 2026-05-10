@@ -59,11 +59,15 @@ async def localize(user_id: str, text: str, profile: dict = None) -> str:
         return text
 
     # Caché distribuido y persistente con Redis usando hash MD5
-    text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
-    redis_key = f"lang:{lang_key}:{text_hash}"
-    cached = await redis_client.get(redis_key)
-    if cached:
-        return cached.decode('utf-8')
+    try:
+        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+        redis_key = f"lang:{lang_key}:{text_hash}"
+        cached = await redis_client.get(redis_key)
+        if cached:
+            return cached.decode('utf-8')
+    except Exception as e:
+        logger.warning(f"Redis get error in localize: {e}")
+        redis_key = None
 
     prompt = f"""Translate the following text to {language}.
 CRITICAL: Maintain the exact same formatting, Markdown, and emojis. Do NOT add any conversational text. Return ONLY the translated text.
@@ -76,8 +80,17 @@ TEXT TO TRANSLATE:
             contents=prompt,
             config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
-        translated = response.text.strip()
-        await redis_client.set(redis_key, translated, ex=86400 * 30) # Retener por 30 días
+        
+        try:
+            translated = response.text.strip()
+        except ValueError:
+            return text
+            
+        if redis_key:
+            try:
+                await redis_client.set(redis_key, translated, ex=86400 * 30) # Retener por 30 días
+            except Exception:
+                pass
         return translated
     except Exception as e:
         logger.error(f"Localization error: {e}")
@@ -298,7 +311,11 @@ Respond ONLY with a JSON object in this exact format:
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json", safety_settings=SAFETY_SETTINGS)
         )
-        data = parse_json_response(response.text)
+        try:
+            raw_text = response.text
+        except ValueError:
+            raise ValueError("Stats generation blocked by safety filters.")
+        data = parse_json_response(raw_text)
         if not data or not isinstance(data, dict):
             raise ValueError("Formato de estadísticas inválido generado por la IA.")
         
@@ -551,9 +568,13 @@ INSTRUCTIONS:
             config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
         try:
-            await status_msg.edit_text(response.text, parse_mode="Markdown")
+            try:
+                response_text = response.text
+            except ValueError:
+                response_text = "I couldn't generate the reflection due to safety filters. Try again."
+            await status_msg.edit_text(response_text, parse_mode="Markdown")
         except Exception:
-            await status_msg.edit_text(response.text)
+            await status_msg.edit_text(response_text)
     except Exception as e:
         logger.error(f"Reflect command error: {e}")
         msg_err = await localize(user_id, "I had trouble generating your reflection. Try again in a moment.", profile)
@@ -646,7 +667,11 @@ async def flashback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             contents=prompt,
             config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
-        await update.message.reply_text(response.text.strip())
+        try:
+            response_text = response.text.strip()
+        except ValueError:
+            response_text = "I couldn't recall that right now. Let's talk about something else."
+        await update.message.reply_text(response_text)
     except Exception as e:
         logger.error(f"Flashback error: {e}")
         msg = await localize(user_id, f"I was just thinking about when you mentioned: '{event}' ({date}). How do you feel about that now?", profile)

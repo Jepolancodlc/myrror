@@ -10,13 +10,18 @@ from app.db.database import get_null_episodes, update_episode_embedding, supabas
 from app.services.extractor import SAFETY_SETTINGS
 from telegram.ext import ContextTypes
 from tenacity import retry, stop_after_attempt, wait_exponential
-from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Load local embedding model
-sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+try:
+    from sentence_transformers import SentenceTransformer
+    sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+    USE_LOCAL_EMBEDDINGS = True
+except (ImportError, Exception) as e:
+    logger.warning(f"Local embeddings unavailable ({e}). Falling back to Gemini.")
+    sentence_model = None
+    USE_LOCAL_EMBEDDINGS = False
 
 # Registry for background tasks to avoid GC death
 _bg_tasks = set()
@@ -25,6 +30,11 @@ _bg_tasks = set()
 async def safe_generate_content(*args, **kwargs):
     """Protects proactive check-ins from network failures."""
     return await client.aio.models.generate_content(*args, **kwargs)
+
+@retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=3, max=30), reraise=True)
+async def safe_embed_content(*args, **kwargs):
+    """Protects vector memory generation from network failures."""
+    return await client.aio.models.embed_content(*args, **kwargs)
 
 async def _process_user_checkin(context, user_id, data, days_silent, thresholds, now):
     """Handles individual proactive check-in asynchronously without blocking the main loop."""
@@ -148,10 +158,21 @@ async def daily_maintenance_job(context: ContextTypes.DEFAULT_TYPE):
         try:
             # BATCH REQUEST: Encode all events at once locally
             events_text = [ep["event"] for ep in valid_eps]
-            embeddings = await asyncio.to_thread(lambda: sentence_model.encode(events_text).tolist())
-            for ep, emb in zip(valid_eps, embeddings):
-                await asyncio.to_thread(update_episode_embedding, ep["id"], emb)
-                fixed += 1
+            
+            if USE_LOCAL_EMBEDDINGS and sentence_model:
+                embeddings = await asyncio.to_thread(lambda: sentence_model.encode(events_text).tolist())
+            else:
+                emb_res = await safe_embed_content(
+                    model="text-embedding-004", 
+                    contents=events_text,
+                    config=types.EmbedContentConfig(output_dimensionality=384)
+                )
+                embeddings = [emb.values for emb in emb_res.embeddings] if emb_res.embeddings else []
+                
+            if embeddings:
+                for ep, emb in zip(valid_eps, embeddings):
+                    await asyncio.to_thread(update_episode_embedding, ep["id"], emb)
+                    fixed += 1
         except Exception as e:
             logger.error(f"Failed to fix memories for {user_id}: {e}")
             
