@@ -239,7 +239,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
     message = update.effective_message
     # 1. HUMAN READING SIMULATION: Wait a few seconds reading the user's text before "typing"
     # Average reading speed is ~150 chars per second. Max reading pause of 3 seconds.
-        reading_delay = min(len(content) / 300.0, 1.0) + random.uniform(0.1, 0.3)
+    reading_delay = min(len(content) / 300.0, 1.0) + random.uniform(0.1, 0.3)
     await asyncio.sleep(reading_delay)
 
     async def keep_typing():
@@ -289,7 +289,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
                 
         speed_chars_per_sec = max(speed_chars_per_sec, 30.0) # Prevent impossibly slow typing
         # Add human random variance
-            typing_delay = min(len(text) / (speed_chars_per_sec * 2), 1.5) + random.uniform(0.1, 0.3)
+        typing_delay = min(len(text) / (speed_chars_per_sec * 2), 1.5) + random.uniform(0.1, 0.3)
         await asyncio.sleep(typing_delay)
         
         markup = None
