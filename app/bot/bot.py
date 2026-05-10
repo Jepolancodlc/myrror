@@ -465,11 +465,20 @@ async def start_telegram_bot():
     else:
         logger.warning("JobQueue is None. Proactive background jobs are disabled. Install 'python-telegram-bot[job-queue]'.")
     
-    await telegram_app.bot.delete_webhook(drop_pending_updates=True)
     await telegram_app.initialize()
-    await telegram_app.start()
-    await telegram_app.updater.start_polling()
-    logger.info("Telegram bot started successfully in the main event loop.")
+    
+    # Switch to Webhooks automatically if deployed on Render to prevent getUpdates conflicts
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
+    if render_url:
+        webhook_url = f"{render_url}/webhook"
+        await telegram_app.bot.set_webhook(url=webhook_url)
+        await telegram_app.start()
+        logger.info(f"Telegram bot started using Webhook at {webhook_url}")
+    else:
+        await telegram_app.bot.delete_webhook(drop_pending_updates=True)
+        await telegram_app.start()
+        await telegram_app.updater.start_polling()
+        logger.info("Telegram bot started successfully with Long Polling.")
 
 async def stop_telegram_bot():
     global telegram_app
@@ -478,4 +487,21 @@ async def stop_telegram_bot():
             await telegram_app.updater.stop()
         await telegram_app.stop()
         await telegram_app.shutdown()
+            
+    # Graceful shutdown: Wait for background tasks to avoid data loss on Render free tier restarts
+    if _bg_tasks:
+        logger.info(f"Graceful shutdown: Waiting for {len(_bg_tasks)} bot tasks to finish...")
+        await asyncio.gather(*_bg_tasks, return_exceptions=True)
+        
+    from app.services.chat import background_tasks as chat_tasks
+    if chat_tasks:
+        logger.info(f"Graceful shutdown: Waiting for {len(chat_tasks)} chat tasks to finish...")
+        await asyncio.gather(*chat_tasks, return_exceptions=True)
+        
+    from app.services.extractor import _bg_tasks as extractor_tasks
+    if extractor_tasks:
+        logger.info(f"Graceful shutdown: Waiting for {len(extractor_tasks)} extractor tasks to finish...")
+        await asyncio.gather(*extractor_tasks, return_exceptions=True)
+
     await redis_client.aclose()
+    

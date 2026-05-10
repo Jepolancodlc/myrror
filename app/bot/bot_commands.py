@@ -99,6 +99,7 @@ async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         import io
+        import gc
         
         # FIX: Ensure dates and scores align perfectly by filtering together
         valid_moods = [e for e in mood_data[-14:] if str(e.get("to", "")).replace(',', '.').replace('.', '', 1).isdigit()]
@@ -118,9 +119,11 @@ async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fig.tight_layout()
 
         buf = io.BytesIO()
-        fig.savefig(buf, format='png')
+        fig.savefig(buf, format='png', dpi=100)
         buf.seek(0)
-        plt.close(fig)
+        fig.clf()
+        plt.close('all')
+        gc.collect()
         return buf
 
     try:
@@ -219,6 +222,7 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             import matplotlib.pyplot as plt
             import io
             import math
+            import gc
             
             def safe_float(val, default=5.0):
                 try: return float(val)
@@ -249,9 +253,11 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ax.set_title("Your Psychological Signature", size=14, color='#333', y=1.1)
             
             buf = io.BytesIO()
-            fig.savefig(buf, format='png', bbox_inches='tight')
+            fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
             buf.seek(0)
-            plt.close(fig)
+            fig.clf()
+            plt.close('all')
+            gc.collect()
             return buf
 
         try:
@@ -302,6 +308,7 @@ Respond ONLY with a JSON object in this exact format:
             import matplotlib.pyplot as plt
             import io
             import math
+            import gc
             
             fig = plt.figure(figsize=(10, 5), facecolor='#121212')
             
@@ -350,9 +357,11 @@ Respond ONLY with a JSON object in this exact format:
             fig.tight_layout()
             
             buf = io.BytesIO()
-            fig.savefig(buf, format='png', bbox_inches='tight', dpi=150)
+            fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
             buf.seek(0)
-            plt.close(fig)
+            fig.clf()
+            plt.close('all')
+            gc.collect()
             return buf
 
         buf = await asyncio.to_thread(_generate_stats_graphs, data)

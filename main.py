@@ -3,9 +3,11 @@ import logging
 import os
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from app.bot.bot import start_telegram_bot, stop_telegram_bot
+import app.bot.bot as bot_module
 from app.core.keepalive import keep_alive
+from telegram import Update
 
 # Configuración general de Logs para producción
 logging.basicConfig(
@@ -42,6 +44,14 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
+
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    """Endpoint to receive updates from Telegram via Webhook in production."""
+    if bot_module.telegram_app:
+        update = Update.de_json(await request.json(), bot_module.telegram_app.bot)
+        await bot_module.telegram_app.process_update(update)
+    return Response(status_code=200)
 
 if __name__ == "__main__":
     import uvicorn
