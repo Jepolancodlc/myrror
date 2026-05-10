@@ -21,7 +21,7 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379"
 redis_client = redis.from_url(REDIS_URL)
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
+@retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=3, max=30), reraise=True)
 async def safe_generate_content(*args, **kwargs):
     """Previene que los comandos fallen si la API de Gemini tiene caídas temporales de red."""
     return await client.aio.models.generate_content(*args, **kwargs)

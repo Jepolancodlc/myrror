@@ -25,7 +25,7 @@ redis_client = redis.from_url(REDIS_URL)
 THOUGHT_PATTERN = re.compile(r'<thought>.*?</thought>', flags=re.DOTALL)
 
 # --- API RESILIENCE SHIELD ---
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
+@retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=3, max=30), reraise=True)
 async def safe_generate_content(*args, **kwargs):
     """Auto-retry for Gemini API if Google returns 429 (Rate Limit) or network timeouts."""
     return await client.aio.models.generate_content(*args, **kwargs)
@@ -65,47 +65,6 @@ async def get_or_create_context_cache(user_id: str, profile: dict, full_history:
 # Task registry: Holds strong references so Python's Garbage Collector doesn't kill async tasks mid-execution.
 background_tasks = set()
 
-async def detect_crisis(content: str, history: list, profile: dict) -> bool:
-    """
-    Dynamic Crisis Detection: Uses Gemini to evaluate implicit subtext and despair,
-    falling back to safety heuristics if the API blocks the request due to self-harm filters.
-    """
-    history_text = "\n".join([f"{m['role']}: {m['content'][:100]}" for m in history[-3:]]) if history else ""
-    prompt = f"""You are a clinical safety evaluator.
-Determine if the user's message indicates an acute psychological crisis, severe despair, or risk of self-harm.
-Look for implicit signs of giving up, extreme apathy, or dangerous distress. 
-Do NOT flag normal venting, frustration, casual sadness, or gaming/work complaints (e.g., "I give up on this code").
-
-RECENT CONTEXT:
-{history_text}
-
-USER'S NEW MESSAGE:
-"{content}"
-
-Respond EXACTLY with a single word: "true" (if crisis) or "false" (if not)."""
-
-    try:
-        response = await safe_generate_content(
-            model="gemini-3.1-flash-lite-preview",
-            contents=prompt
-        )
-        # Gemini Safety filters often block self-harm text entirely, returning no text.
-        if not response.text:
-            logger.warning("Crisis detection API blocked by safety filters. Defaulting to True.")
-            return True
-            
-        return "true" in response.text.strip().lower()
-    except Exception as e:
-        logger.error(f"Dynamic crisis detection error: {e}")
-        # Fallback Heuristic if API fails
-        fallback_keywords = [
-            "para qué", "no tiene sentido", "no vale la pena", "desaparecer", 
-            "what's the point", "disappear", "me quiero morir", "no quiero vivir", 
-            "i want to die", "kill myself", "end it all", "acabar con todo", 
-            "suicide", "suicidio"
-        ]
-        return any(kw in content.lower() for kw in fallback_keywords)
-
 async def analyze_conversation_context(content: str, history: list) -> dict:
     """
     Semantic Router: Analyzes the chat to extract a 1-sentence summary AND the active life domains.
@@ -130,6 +89,7 @@ NEW MESSAGE: "{content}"
 TASK: Analyze the context and output ONLY a JSON object with:
 1. "summary": ONE concise sentence describing the conversational dynamics (e.g. topic changes, tone shifts, cognitive distortions).
 2. "domains": An array of active life domains. Choose from: ["work", "relationships", "emotional", "growth", "identity", "health", "finance"].
+3. "is_crisis": Boolean (true/false). True ONLY if the message indicates an acute psychological crisis, severe despair, or risk of self-harm.
 
 Respond ONLY with valid JSON.
 """
@@ -149,16 +109,20 @@ Respond ONLY with valid JSON.
         return {"summary": "", "domains": []}
 
 async def get_response(user_id: str, content: str, new_session: bool = False) -> str:
-    profile = await asyncio.to_thread(get_profile, user_id) or {}
-    
-    # Retrieve a broader context window (30 messages) for potential history compression
-    history = await asyncio.to_thread(get_messages, user_id, 30)
+    # Concurrently fetch DB profile and history to shave off network latency
+    profile_res, history = await asyncio.gather(
+        asyncio.to_thread(get_profile, user_id),
+        asyncio.to_thread(get_messages, user_id, 30)
+    )
+    profile = profile_res or {}
+
     recent_history = history[-10:] if history else []
     compressed_context = await compress_history(user_id, history, profile)
 
     # --- SEMANTIC ROUTING (DYNAMIC DOMAINS) ---
-    conv_data = {"summary": "", "domains": []}
-    if recent_history and len(recent_history) >= 1:
+    conv_data = {"summary": "", "domains": [], "is_crisis": False}
+    is_substantial = len(content.split()) >= 4 or len(content) > 20
+    if recent_history and len(recent_history) >= 1 and (is_substantial or new_session):
         try:
             conv_data = await analyze_conversation_context(content, recent_history)
         except Exception as e:
@@ -166,6 +130,17 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
 
     conv_ctx = conv_data.get("summary", "")
     active_domains = conv_data.get("domains", [])
+    in_crisis = conv_data.get("is_crisis", False)
+    
+    # Fallback heurístico en caso de que la IA no detecte la intención
+    fallback_keywords = [
+        "para qué", "no tiene sentido", "no vale la pena", "desaparecer", 
+        "what's the point", "disappear", "me quiero morir", "no quiero vivir", 
+        "i want to die", "kill myself", "end it all", "acabar con todo", 
+        "suicide", "suicidio", "pastillas", "pills", "edge"
+    ]
+    if not in_crisis and any(kw in content.lower() for kw in fallback_keywords):
+        in_crisis = True
 
     # 1. Attempt to get cache (pass older history, excluding the last 10 messages)
     older_history = history[:-10] if len(history) > 10 else []
@@ -212,7 +187,6 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
         ctx += "\n\nThe user explicitly started a new session."
 
     # Crisis detection
-    in_crisis = await detect_crisis(content, recent_history, profile)
     if in_crisis:
         ctx += "\n\nCRISIS MODE: The user may be struggling right now. Do NOT analyze, push, or give advice. Only listen. Be warm, present, and human. Ask one simple question: are they okay. If things seem serious, gently mention that talking to someone real can help."
 
@@ -411,12 +385,16 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
 
     # Semantic RAG Memory Engine
     memory_block = []
-    # Semantic RAG Trigger: Only run costly vector searches if the message has substance (ignores "yes", "ok").
-    if len(content.split()) > 3 or len(content) > 15 or conv_ctx:
+    
+    # Semantic RAG Trigger: Only run costly vector searches if the message has real substance
+    # or if the Semantic Router flagged active psychological domains.
+    has_substance = len(content.split()) >= 8 or len(content) > 40
+    if has_substance or active_domains:
         try:
             # HYPER-PRECISE RAG: Combine the high-level conversation summary with the raw message
             embed_text = f"Context: {conv_ctx}\nMessage: {content}"
-            embed_text = embed_text if len(embed_text) <= 8000 else embed_text[:8000]
+            # Limit token cost by truncating unnecessary length before embedding
+            embed_text = embed_text if len(embed_text) <= 2000 else embed_text[:2000]
             eps_text = await get_rag_memories_text(user_id, embed_text)
             if eps_text:
                 memory_block.append(f"RELEVANT PAST MEMORIES (Triggered by the user's message):\n{eps_text}\nSTEALTH MEMORY: Use these invisibly. Sound like a human who just remembered something naturally. Draw advice from their OWN past track record.")

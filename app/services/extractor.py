@@ -10,14 +10,18 @@ from google import genai
 from google.genai import types
 from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
 from app.db.database import get_profile, save_profile, save_episode, save_person, get_all_people, save_message, get_episodes, get_user_lock, get_messages, search_similar_episodes
-from app.models.schemas import PersonSchema, ProfileSchema, EpisodeSchema
+from app.models.schemas import PersonSchema, ProfileSchema, EpisodeSchema, UnifiedExtractionSchema
 from datetime import datetime
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Load local embedding model (runs on CPU/RAM, zero API cost)
+sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 alert_callback = None
 
@@ -39,7 +43,7 @@ def set_alert_callback(cb):
 # Keep strong references to background tasks so the GC doesn't kill them
 _bg_tasks = set()
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
+@retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=3, max=30), reraise=True)
 async def safe_generate_content(*args, **kwargs):
     """Previene que los resúmenes y extracción de memoria mueran si la API parpadea."""
     return await client.aio.models.generate_content(*args, **kwargs)
@@ -609,13 +613,8 @@ CRITICAL RULES for Extraction:
             if episode.get("event"):
                 embedding = None
                 try:
-                    # Generate the semantic memory vector (embedding) using Gemini's embedding model
-                    emb_res = await client.aio.models.embed_content(
-                        model="text-embedding-004",
-                        contents=episode["event"]
-                    )
-                    if emb_res.embeddings:
-                        embedding = emb_res.embeddings[0].values
+                        # Generate embedding locally without blocking the async loop
+                        embedding = await asyncio.to_thread(lambda text=episode["event"]: sentence_model.encode(text).tolist())
                 except Exception as e:
                     logger.error(f"Embedding error: {e}")
 
@@ -690,12 +689,7 @@ INSTRUCTIONS:
         
         embedding = None
         try:
-            emb_res = await client.aio.models.embed_content(
-                model="text-embedding-004",
-                contents=f"Weekly summary: {summary[:1000]}"
-            )
-            if emb_res.embeddings:
-                embedding = emb_res.embeddings[0].values
+            embedding = await asyncio.to_thread(lambda text=f"Weekly summary: {summary[:1000]}": sentence_model.encode(text).tolist())
         except Exception as e:
             logger.error(f"Weekly summary embedding error: {e}")
 
@@ -746,12 +740,7 @@ Include a brief self-critique: What approach worked or failed for MYRROR today b
         
         embedding = None
         try:
-            emb_res = await client.aio.models.embed_content(
-                model="text-embedding-004",
-                contents=f"Daily summary: {summary[:200]}"
-            )
-            if emb_res.embeddings:
-                embedding = emb_res.embeddings[0].values
+            embedding = await asyncio.to_thread(lambda text=f"Daily summary: {summary[:200]}": sentence_model.encode(text).tolist())
         except Exception as e:
             logger.error(f"Daily summary embedding error: {e}")
             
@@ -846,25 +835,146 @@ async def compress_history(user_id: str, messages: list, profile: dict) -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def run_post_analysis_tasks(user_id: str, context_type: str, content: str, response: str, profile: dict, in_crisis: bool = False):
+    """
+    Unified Post-Analysis: Executes Profile, Episodes, and People extraction in a SINGLE API CALL
+    to avoid 429 RESOURCE_EXHAUSTED errors on Gemini's free tier.
+    """
     try:
-        if in_crisis:
-            profile["last_crisis"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        else:
-            profile.pop("crisis_checked", None)
-            
-        await extract_and_save_profile(user_id, context_type, content, response, profile)
-        
-        # ANTI-429 DELAY: Pausa para evitar saturar el límite de 15 RPM de Gemini Free Tier
-        await asyncio.sleep(3)
+        light_profile = {k: v for k, v in profile.items() if k not in ["evolution", "confidence", "history_cache"] and v}
+        user_name = profile.get("name", "the user")
         
         recent_episodes = await asyncio.to_thread(get_episodes, user_id, 10)
+        existing_people = await asyncio.to_thread(get_all_people, user_id)
         
-        # Ejecutar secuencialmente en lugar de concurrentemente para no agotar la cuota de la API
-        await extract_episodes_from_content(user_id, context_type, content, response, profile, recent_episodes)
+        ep_list = "\n".join([f"- {ep.get('event')}" for ep in recent_episodes]) if recent_episodes else "None"
+        people_list = "\n".join([f"- {p['name']} ({p.get('relationship', 'unknown')})" for p in existing_people]) if existing_people else "None"
         
-        await asyncio.sleep(3)
+        prompt = f"""You are MYRROR's central extraction engine.
+Analyze this interaction and extract: 1) Profile Updates, 2) New Episodes, 3) People Mentions.
+
+CONTEXT TYPE: {context_type}
+INTERACTION:
+User ({user_name}): "{content[:4000]}"
+MYRROR: "{response[:4000]}"
+
+--- TASK 1: PROFILE UPDATES ---
+CURRENT PROFILE: {json.dumps(light_profile, ensure_ascii=False, separators=(',', ':'))}
+- Update ONLY what is explicitly new or changed based on this interaction. Keep existing data if unchanged.
+- Look for traits, mood, clinical profile shifts, behaviors, or preferences.
+- If the user corrects MYRROR, update 'failed_advice' or 'interaction_manual'.
+
+--- TASK 2: NEW EPISODES (MEMORIES) ---
+RECENT EPISODES (DO NOT DUPLICATE):
+{ep_list}
+- Extract ONLY highly significant life events (e.g., job changes, epiphanies, traumas).
+- DO NOT extract mundane activities. DO NOT extract "The user talked to MYRROR...".
+
+--- TASK 3: PEOPLE MENTIONS ---
+EXISTING PEOPLE:
+{people_list}
+- Extract REAL people explicitly mentioned. Deduce their relationship and power dynamic.
+- CRITICAL: If the person is already in the EXISTING PEOPLE list, use their EXACT name. Do NOT extract the user themselves or MYRROR.
+
+Return a JSON object containing 'profile_updates', 'episodes', and 'people'.
+"""
+        result = await safe_generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=UnifiedExtractionSchema,
+                safety_settings=SAFETY_SETTINGS
+            )
+        )
         
-        await extract_people(user_id, context_type, content, response, profile)
+        data = parse_json_response(result.text)
+        if not data:
+            return
+
+        # 1. PROFILE
+        if data.get("profile_updates"):
+            new_data = {k: v for k, v in data["profile_updates"].items() if v is not None}
+            if new_data:
+                source = new_data.pop("data_source", "inferred")
+                async with get_user_lock(user_id):
+                    current_db_profile = await asyncio.to_thread(get_profile, user_id)
+                    if in_crisis:
+                        current_db_profile["last_crisis"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    else:
+                        current_db_profile.pop("crisis_checked", None)
+                        
+                    old_evolution_len = len((current_db_profile.get("evolution") or [])[-49:])
+                    evolution = track_evolution(current_db_profile, new_data)
+                    new_shifts = evolution[old_evolution_len:]
+                    confidence = update_confidence(current_db_profile, new_data, source)
+                    
+                    updated = deep_merge(current_db_profile, new_data)
+                    updated["evolution"] = evolution
+                    updated["confidence"] = confidence
+                    updated["last_conversation"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    updated["total_conversations"] = updated.get("total_conversations", 0) + 1
+
+                    await asyncio.to_thread(save_profile, user_id, updated)
+                    
+                drastic_shifts = [
+                    s for s in new_shifts 
+                    if s['field'] in ('clinical_profile', 'cognition_style', 'archetype', 'psyche_and_motivations', 'core_beliefs', 'behavioral_patterns')
+                    and updated.get("confidence", {}).get(s['field'], {}).get("level") == "high"
+                ]
+                if drastic_shifts and alert_callback:
+                    task = asyncio.create_task(evaluate_and_send_epiphany(user_id, updated, drastic_shifts))
+                    _bg_tasks.add(task)
+                    task.add_done_callback(_bg_tasks.discard)
+
+        # 2. EPISODES
+        if data.get("episodes"):
+            for episode in data["episodes"]:
+                if episode.get("event"):
+                    embedding = None
+                    try:
+                        embedding = await asyncio.to_thread(lambda text=episode["event"]: sentence_model.encode(text).tolist())
+                    except Exception as e:
+                        logger.error(f"Embedding error: {e}")
+
+                    await asyncio.to_thread(
+                        save_episode,
+                        user_id=user_id,
+                        event=episode["event"],
+                        domain=episode.get("domain"),
+                        impact=episode.get("impact"),
+                        embedding=embedding
+                    )
+
+        # 3. PEOPLE
+        if data.get("people"):
+            existing_names = {p['name'].lower().strip(): p for p in existing_people} if existing_people else {}
+            user_name_lower = user_name.lower().strip() if user_name and user_name != "the user" else ""
+            
+            for person in data["people"]:
+                if person.get("name"):
+                    person_name_lower = person["name"].lower().strip()
+                    if user_name_lower and (person_name_lower == user_name_lower or user_name_lower in person_name_lower.split() or person_name_lower in user_name_lower.split()):
+                        continue
+                    
+                    relationship = person.get("relationship")
+                    notes = person.get("notes") or {}
+
+                    if person_name_lower in existing_names:
+                        old_person = existing_names[person_name_lower]
+                        person["name"] = old_person["name"]
+                        if not relationship:
+                            relationship = old_person.get("relationship")
+                        old_notes = old_person.get("notes") or {}
+                        if isinstance(old_notes, dict) and isinstance(notes, dict):
+                            notes = {**old_notes, **notes}
+                            
+                    await asyncio.to_thread(
+                        save_person,
+                        user_id=user_id,
+                        name=person["name"],
+                        relationship=relationship,
+                        notes=notes
+                    )
     except Exception as e:
         logger.error(f"Post-analysis tasks error for {user_id}: {e}", exc_info=True)
 
@@ -873,14 +983,9 @@ async def get_rag_memories_text(user_id: str, query_text: str) -> str:
     if not query_text or (len(query_text.split()) <= 3 and len(query_text) <= 15):
         return ""
     try:
-        emb_res = await client.aio.models.embed_content(
-            model="text-embedding-004",
-            contents=query_text[:8000]
-        )
-        if not emb_res.embeddings:
-            return ""
+        embedding = await asyncio.to_thread(lambda text=query_text[:8000]: sentence_model.encode(text).tolist())
         
-        relevant_episodes = await asyncio.to_thread(search_similar_episodes, user_id, emb_res.embeddings[0].values, limit=3)
+        relevant_episodes = await asyncio.to_thread(search_similar_episodes, user_id, embedding, limit=3)
         if not relevant_episodes:
             return ""
             

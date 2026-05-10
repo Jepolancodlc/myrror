@@ -36,7 +36,7 @@ telegram_app = None
 THOUGHT_PATTERN = re.compile(r'<thought>.*?</thought>', flags=re.DOTALL)
 OPTIONS_PATTERN = re.compile(r'\[OPTIONS:(.*?)\]')
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
+@retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=3, max=30), reraise=True)
 async def safe_generate_content(*args, **kwargs):
     """Auto-retry for Gemini API if Google returns 429 (Rate Limit) or network timeouts."""
     return await client.aio.models.generate_content(*args, **kwargs)
@@ -239,7 +239,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
     message = update.effective_message
     # 1. HUMAN READING SIMULATION: Wait a few seconds reading the user's text before "typing"
     # Average reading speed is ~150 chars per second. Max reading pause of 3 seconds.
-    reading_delay = min(len(content) / 150.0, 3.0) + random.uniform(0.2, 0.8)
+        reading_delay = min(len(content) / 300.0, 1.0) + random.uniform(0.1, 0.3)
     await asyncio.sleep(reading_delay)
 
     async def keep_typing():
@@ -289,7 +289,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
                 
         speed_chars_per_sec = max(speed_chars_per_sec, 30.0) # Prevent impossibly slow typing
         # Add human random variance
-        typing_delay = min(len(text) / speed_chars_per_sec, 4.0) + random.uniform(0.1, 0.7)
+            typing_delay = min(len(text) / (speed_chars_per_sec * 2), 1.5) + random.uniform(0.1, 0.3)
         await asyncio.sleep(typing_delay)
         
         markup = None
@@ -360,13 +360,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     profile = await asyncio.to_thread(get_profile, user_id)
     
     # Dynamic cooldown based on communication style
-    cooldown = 3.0
+    cooldown = 1.5
     if profile:
         comm_style = str(profile.get("communication_style", "")).lower()
         if "rapid" in comm_style or "burst" in comm_style or "short" in comm_style:
-            cooldown = 4.5 # Wait longer for them to finish their burst
+            cooldown = 2.5
         elif "slow" in comm_style or "thoughtful" in comm_style or "long" in comm_style:
-            cooldown = 2.0 # They write in single big chunks, respond faster
+            cooldown = 1.0
 
     if len(content) < 2:
         return

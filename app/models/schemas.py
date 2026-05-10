@@ -97,3 +97,8 @@ class EpisodeSchema(BaseModel):
 class QuizSchema(BaseModel):
     question: str
     options: list[str] = Field(description="Exactly 4 options")
+
+class UnifiedExtractionSchema(BaseModel):
+    profile_updates: Optional[ProfileSchema] = Field(default=None)
+    episodes: Optional[List[EpisodeSchema]] = Field(default=None)
+    people: Optional[List[PersonSchema]] = Field(default=None)
