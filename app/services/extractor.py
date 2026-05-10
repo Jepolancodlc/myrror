@@ -854,12 +854,17 @@ async def run_post_analysis_tasks(user_id: str, context_type: str, content: str,
             
         await extract_and_save_profile(user_id, context_type, content, response, profile)
         
+        # ANTI-429 DELAY: Pausa para evitar saturar el límite de 15 RPM de Gemini Free Tier
+        await asyncio.sleep(3)
+        
         recent_episodes = await asyncio.to_thread(get_episodes, user_id, 10)
         
-        await asyncio.gather(
-            extract_episodes_from_content(user_id, context_type, content, response, profile, recent_episodes),
-            extract_people(user_id, context_type, content, response, profile)
-        )
+        # Ejecutar secuencialmente en lugar de concurrentemente para no agotar la cuota de la API
+        await extract_episodes_from_content(user_id, context_type, content, response, profile, recent_episodes)
+        
+        await asyncio.sleep(3)
+        
+        await extract_people(user_id, context_type, content, response, profile)
     except Exception as e:
         logger.error(f"Post-analysis tasks error for {user_id}: {e}", exc_info=True)
 
