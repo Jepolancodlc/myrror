@@ -22,7 +22,6 @@ THOUGHT_PATTERN = re.compile(r'<thought>.*?</thought>', flags=re.DOTALL)
 async def analyze_image(user_id: str, file_bytes: bytearray, caption: str) -> str:
     profile = await asyncio.to_thread(get_profile, user_id) or {}
     profile_ctx = get_profile_for_context(profile, caption)
-    image_base64 = base64.b64encode(file_bytes).decode("utf-8")
 
     recent_history = await asyncio.to_thread(get_messages, user_id, 6)
     history_text = ""
@@ -44,27 +43,25 @@ async def analyze_image(user_id: str, file_bytes: bytearray, caption: str) -> st
 
     mood = profile.get("current_mood_score", "unknown")
     try:
+        prompt_text = (
+            f"{SYSTEM_PROMPT}\n\nWHAT YOU KNOW ABOUT THIS USER:\n{profile_ctx}{history_text}\n\n"
+            f"USER'S CURRENT MOOD SCORE: {mood}/10. Adapt your emotional tone to respect their current state.\n\n"
+            f"The user sent an image with this message: '{caption}'\n\n"
+            "INSTRUCTIONS:\n"
+            "1. Analyze the image as MYRROR. Look beyond the obvious.\n"
+            "2. Notice the environment, mood, lighting, and hidden details.\n"
+            "3. MUSIC/LYRICS DETECTION: If the image is a screenshot of a music app (Spotify, Apple Music) or contains lyrics, explicitly identify the song and artist. Use the meaning of the song/lyrics as a window into their current emotional state.\n"
+            "4. Connect this visual to their psychological profile. Why did they share this with you right now?\n"
+            "5. Be brutally honest, highly observant, and deeply personal, but use simple, easy-to-understand language.\n"
+            "6. NATURAL REACTION: If the image is casual/everyday, react casually. If it's profound, be profound. DO NOT force a deep Socratic question if it doesn't fit the context naturally.\n"
+            "7. CRITICAL: You MUST reply entirely in the user's language."
+        )
+        
         response = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=[
-                {
-                    "parts": [
-                        {"text": (
-                            f"{SYSTEM_PROMPT}\n\nWHAT YOU KNOW ABOUT THIS USER:\n{profile_ctx}{history_text}\n\n"
-                            f"USER'S CURRENT MOOD SCORE: {mood}/10. Adapt your emotional tone to respect their current state.\n\n"
-                            f"The user sent an image with this message: '{caption}'\n\n"
-                            "INSTRUCTIONS:\n"
-                            "1. Analyze the image as MYRROR. Look beyond the obvious.\n"
-                            "2. Notice the environment, mood, lighting, and hidden details.\n"
-                            "3. MUSIC/LYRICS DETECTION: If the image is a screenshot of a music app (Spotify, Apple Music) or contains lyrics, explicitly identify the song and artist. Use the meaning of the song/lyrics as a window into their current emotional state.\n"
-                            "4. Connect this visual to their psychological profile. Why did they share this with you right now?\n"
-                            "5. Be brutally honest, highly observant, and deeply personal, but use simple, easy-to-understand language.\n"
-                            "6. NATURAL REACTION: If the image is casual/everyday, react casually. If it's profound, be profound. DO NOT force a deep Socratic question if it doesn't fit the context naturally.\n"
-                            "7. CRITICAL: You MUST reply entirely in the user's language."
-                        )},
-                        {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
-                    ]
-                }
+                prompt_text,
+                types.Part.from_bytes(data=bytes(file_bytes), mime_type="image/jpeg")
             ],
             config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )
@@ -146,26 +143,22 @@ INSTRUCTIONS:
 
         elif mime == "application/pdf" or mime.startswith("image/"):
             mood = profile.get("current_mood_score", "unknown")
-            file_base64 = base64.b64encode(file_bytes).decode("utf-8")
+            prompt_text = (
+                f"{SYSTEM_PROMPT}\n\nWHAT YOU KNOW ABOUT THIS USER:\n{profile_ctx}{history_text}\n\n"
+                f"USER'S CURRENT MOOD SCORE: {mood}/10. Adapt your emotional tone to respect their current state.\n\n"
+                f"User message: '{caption}'\n\n"
+                "INSTRUCTIONS:\n"
+                "1. Detect the document type and read its contents carefully.\n"
+                "2. Do not just summarize. Read between the lines as MYRROR.\n"
+                "3. Connect the insights to their psychological profile.\n"
+                "4. NATURAL REACTION: Talk about it conversationally. Don't sound like an AI assistant summarizing a PDF.\n"
+                "5. CRITICAL: You MUST reply entirely in the user's language."
+            )
             response = await client.aio.models.generate_content(
                 model="gemini-3.1-flash-lite-preview",
                 contents=[
-                    {
-                        "parts": [
-                            {"text": (
-                                f"{SYSTEM_PROMPT}\n\nWHAT YOU KNOW ABOUT THIS USER:\n{profile_ctx}{history_text}\n\n"
-                                f"USER'S CURRENT MOOD SCORE: {mood}/10. Adapt your emotional tone to respect their current state.\n\n"
-                                f"User message: '{caption}'\n\n"
-                                "INSTRUCTIONS:\n"
-                                "1. Detect the document type and read its contents carefully.\n"
-                                "2. Do not just summarize. Read between the lines as MYRROR.\n"
-                                "3. Connect the insights to their psychological profile.\n"
-                                "4. NATURAL REACTION: Talk about it conversationally. Don't sound like an AI assistant summarizing a PDF.\n"
-                                "5. CRITICAL: You MUST reply entirely in the user's language."
-                            )},
-                            {"inline_data": {"mime_type": mime, "data": file_base64}}
-                        ]
-                    }
+                    prompt_text,
+                    types.Part.from_bytes(data=bytes(file_bytes), mime_type=mime)
             ],
             config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
             )
@@ -194,23 +187,19 @@ INSTRUCTIONS:
         raise
 
 async def analyze_voice(user_id: str, file_bytes: bytearray, mime: str) -> str:
-    audio_base64 = base64.b64encode(file_bytes).decode("utf-8")
     try:
+        prompt_text = (
+            "Listen carefully to this audio. You are natively multimodal, so pay deep attention to the emotional tone, "
+            "voice cracks, sighing, laughing, breathing, speech pace, and stress levels.\n\n"
+            "Return the response in this EXACT format:\n"
+            "[Voice Analysis: Write a sharp, clinical but empathetic observation of HOW they are speaking (e.g., 'Breathing heavily, speaking fast, sounds anxious but trying to hide it')]\n\n"
+            "<Write the exact transcription of what they said, retaining stutters or pauses, in its original language>"
+        )
         response = await client.aio.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=[
-                {
-                    "parts": [
-                        {"text": (
-                            "Listen carefully to this audio. You are natively multimodal, so pay deep attention to the emotional tone, "
-                            "voice cracks, sighing, laughing, breathing, speech pace, and stress levels.\n\n"
-                            "Return the response in this EXACT format:\n"
-                            "[Voice Analysis: Write a sharp, clinical but empathetic observation of HOW they are speaking (e.g., 'Breathing heavily, speaking fast, sounds anxious but trying to hide it')]\n\n"
-                            "<Write the exact transcription of what they said, retaining stutters or pauses, in its original language>"
-                        )},
-                        {"inline_data": {"mime_type": mime, "data": audio_base64}}
-                    ]
-                }
+                prompt_text,
+                types.Part.from_bytes(data=bytes(file_bytes), mime_type=mime)
             ],
             config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
         )

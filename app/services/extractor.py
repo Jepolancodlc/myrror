@@ -531,7 +531,7 @@ RULES:
         async with get_user_lock(user_id):
             current_db_profile = await asyncio.to_thread(get_profile, user_id)
             
-            old_evolution_len = len(current_db_profile.get("evolution") or [])
+            old_evolution_len = len((current_db_profile.get("evolution") or [])[-49:])
             evolution = track_evolution(current_db_profile, new_data)
             new_shifts = evolution[old_evolution_len:]
             confidence = update_confidence(current_db_profile, new_data, source)

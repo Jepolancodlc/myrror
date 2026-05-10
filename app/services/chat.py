@@ -11,7 +11,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
 from app.core.prompt import SYSTEM_PROMPT
 from app.db.database import get_profile, get_messages, save_message, get_all_people
-from app.services.extractor import get_profile_for_context, compress_history, run_post_analysis_tasks, parse_json_response, get_rag_memories_text
+from app.services.extractor import get_profile_for_context, compress_history, run_post_analysis_tasks, parse_json_response, get_rag_memories_text, SAFETY_SETTINGS
 import random
 from datetime import datetime
 
@@ -47,9 +47,9 @@ async def get_or_create_context_cache(user_id: str, profile: dict, full_history:
     try:
         cache = await client.aio.caches.create(
             model="gemini-1.5-flash-002", # 3.1-flash-lite-preview does not support caching
+            contents=[history_text] if history_text else ["No history yet."],
             config=types.CreateCacheConfig(
                 system_instruction=static_instruction,
-                contents=[history_text] if history_text else ["No history yet."],
                 ttl="3600s" # Keeps the cache alive for 1 hour
             )
         )
@@ -461,7 +461,10 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
 
     try:
         gen_model = "gemini-1.5-flash-002" if cache_name else "gemini-3.1-flash-lite-preview"
-        config_kwargs = {"tools": [{"google_search": {}}]}
+        config_kwargs = {
+            "tools": [types.Tool(google_search=types.GoogleSearch())],
+            "safety_settings": SAFETY_SETTINGS
+        }
         if cache_name:
             config_kwargs["cached_content"] = cache_name
             
@@ -479,7 +482,10 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
             
         if not text:
             logger.warning("Respuesta vacía de Gemini. Revisa los logs para errores de API.")
-            text = "I'm having a hard time processing my thoughts right now. Give me a moment."
+            if os.getenv("ENVIRONMENT") == "development":
+                text = "⚠️ **Dev Error:** La API devolvió una respuesta vacía o fue bloqueada por los filtros de seguridad."
+            else:
+                text = "I'm having a hard time processing my thoughts right now. Give me a moment."
 
         # Remove the internal monologue (<thought>) BEFORE saving to DB to prevent memory pollution
         text = THOUGHT_PATTERN.sub('', text).strip()
@@ -517,6 +523,8 @@ async def get_response(user_id: str, content: str, new_session: bool = False) ->
                     text += "\n\n🔍 **Sources:**\n" + "\n".join(sources)
     except Exception as e:
         logger.error(f"Gemini error for {user_id}: {e}", exc_info=True)
+        if os.getenv("ENVIRONMENT") == "development":
+            return f"⚠️ **Dev Error (General):** {str(e)}"
         return "I'm having a hard time processing my thoughts right now. Give me a moment."
 
     try:

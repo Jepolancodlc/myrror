@@ -11,6 +11,13 @@ from app.core.keepalive import keep_alive
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
+
+# Añadir un manejador específico para guardar solo errores en un archivo local
+file_handler = logging.FileHandler("myrror_errors.log", encoding="utf-8")
+file_handler.setLevel(logging.ERROR)  # Solo capturará WARNING, ERROR y CRITICAL
+file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+logging.getLogger().addHandler(file_handler)
+
 logger = logging.getLogger(__name__)
 
 @asynccontextmanager

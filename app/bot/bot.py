@@ -176,7 +176,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text(msg_status, parse_mode="Markdown")
     try:
         text = await analyze_image(user_id, file_bytes, caption)
-        profile = await asyncio.to_thread(get_profile, user_id)
+        profile = await asyncio.to_thread(get_profile, user_id) or {}
         task = asyncio.create_task(run_post_analysis_tasks(user_id, "image", f"Image: {caption}", text, profile))
         _bg_tasks.add(task)
         task.add_done_callback(_bg_tasks.discard)
@@ -221,7 +221,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg_err = await localize(user_id, "I can't read that file type yet. Try .txt, .pdf, or an image.")
             await status_msg.edit_text(msg_err)
             return
-        profile = await asyncio.to_thread(get_profile, user_id)
+        profile = await asyncio.to_thread(get_profile, user_id) or {}
         task = asyncio.create_task(run_post_analysis_tasks(user_id, f"file:{document.file_name}", f"File: {caption}", text, profile))
         _bg_tasks.add(task)
         task.add_done_callback(_bg_tasks.discard)
